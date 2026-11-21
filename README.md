@@ -4,11 +4,48 @@ Hand your AI agent the reins of the browser you already use. Reins lets Claude C
 
 ## Install (one line)
 
-```
+Needs [Node.js 20+](https://nodejs.org). Pick your shell:
+
+**Windows, Command Prompt (cmd)**
+```cmd
 npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz && reins install
 ```
 
-Works in Command Prompt, bash, zsh and PowerShell 7. In Windows PowerShell 5.1, replace `&&` with `;`. It downloads a tarball, so it needs no git or SSH setup. From a local clone: `npm i -g .` then `reins install`.
+**Windows, PowerShell 5.1 (the built-in one)**
+```powershell
+npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz; reins install
+```
+
+**Windows, PowerShell 7+ (pwsh)**
+```powershell
+npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz && reins install
+```
+
+**Windows, Git Bash or WSL**
+```bash
+npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz && reins install
+```
+
+**macOS (Terminal, zsh or bash)**
+```bash
+npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz && reins install
+```
+
+**Linux (bash, zsh, fish)**
+```bash
+npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz && reins install
+```
+If npm says `EACCES` (permission denied), your Node is installed system-wide. Use a user-level Node from [nvm](https://github.com/nvm-sh/nvm), or put `sudo` before `npm` only (not before `reins install`, so the setup lands in your own home folder).
+
+**From a local clone (any OS)**
+```bash
+git clone https://github.com/AnasNafees1802/reins.git
+cd reins
+npm i -g .
+reins install
+```
+
+The one-liners download a tarball, so they need no git or SSH setup. WSL note: inside WSL, `reins install` sets up agents installed in WSL, and the browsers on the Windows side cannot reach it. Run it in a Windows shell if your browsers are on Windows.
 
 `reins install` does everything it can by itself:
 
@@ -21,7 +58,10 @@ In each browser that opens, do this once:
 
 1. Turn on **Developer mode**.
 2. Click **Load unpacked**.
-3. Paste the path (Ctrl+V) and press Enter.
+3. Paste the path and press Enter. It is already on your clipboard.
+   - Windows: paste (Ctrl+V) into the folder box.
+   - macOS: press Cmd+Shift+G first, then paste (Cmd+V).
+   - Linux: press Ctrl+L first, then paste (Ctrl+V). The clipboard copy needs `xclip`; without it, type the path the installer prints.
 
 Then restart your agents and ask: "use reins to list my tabs".
 

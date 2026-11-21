@@ -291,7 +291,7 @@ async function install(opts) {
   console.log(`   Opened the extensions page in: ${todo.map(b => b.name).join(', ')}. In each one:
    a. Turn on "Developer mode" (a switch at the top right, or bottom left in Edge).
    b. Click "Load unpacked".
-   c. ${copied ? 'Paste (Ctrl+V / Cmd+V) into the folder box' : 'Choose this folder'}: ${EXT_DIR}  then press Enter.
+   c. ${{ darwin: 'Press Cmd+Shift+G, paste (Cmd+V)', linux: 'Press Ctrl+L, paste (Ctrl+V)' }[process.platform] || 'Paste (Ctrl+V) into the folder box'}${copied ? '' : ' this path'}: ${EXT_DIR}  then press Enter.
 ${todo.some(b => st.old?.includes(b.id)) ? '   An older "Spark" extension is installed. Click Remove on it first.\n' : ''}
    Waiting for the browsers to connect (Ctrl+C to stop)...`);
   const left = new Set(todo.map(b => b.id));
