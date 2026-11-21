@@ -5,10 +5,10 @@ Hand your AI agent the reins of the browser you already use. Reins lets Claude C
 ## Install (one line)
 
 ```
-npm i -g github:AnasNafees1802/reins; reins install
+npm i -g https://github.com/AnasNafees1802/reins/archive/refs/heads/main.tar.gz && reins install
 ```
 
-From a local clone: `npm i -g .; reins install`
+Works in Command Prompt, bash, zsh and PowerShell 7. In Windows PowerShell 5.1, replace `&&` with `;`. It downloads a tarball, so it needs no git or SSH setup. From a local clone: `npm i -g .` then `reins install`.
 
 `reins install` does everything it can by itself:
 
