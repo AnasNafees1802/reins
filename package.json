@@ -1,0 +1,10 @@
+{
+  "name": "reins",
+  "version": "2.0.0",
+  "description": "Let a local AI agent drive your real Chrome and Edge, with your logged-in sessions.",
+  "bin": { "reins": "bin/reins.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "ws": "^8.18.0" },
+  "files": ["bin", "extension", "skill"],
+  "license": "MIT"
+}

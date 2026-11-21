@@ -1,0 +1,6 @@
+node_modules/
+.aicontext/
+test/*.jsonl
+test/daemon.out
+test/batch.json
+test/b*.json

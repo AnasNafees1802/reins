@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Reins",
+  "version": "2.0.0",
+  "description": "Lets your local coding agent drive this browser with your existing sessions.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2VgmMXK1KHqiqwD2OQFjoVk9GMMi55FLh5ZDqQ5mE81jBd5+rCLa9ibGO+aBaJzTq8RgE90Oz1HcMahMW+6m86ouO/ZfRPA92FSXf1tzIdpIEhqfabhJhjWK3DnWzzgefgJkKb7PxmW7eGV8t/6mgi0xu9tmwh8zEyiuQc0wjMDwbp2CgRG/ZKIikgQbiPEe1A4fO2/5qi4T8Wx8o2okI7iNr3emhEvz9enPlHlfVO1b8EZvi19xuSmJ4aZj1R0pBzXo8N7LiWnBvcvIoWHGoYuuBiAJHKZSE9yjel0NGdaRwQHQStm7n7JpCSR1VssAHGJGLQ9rEJ6uxbrfhES+gQIDAQAB",
+  "minimum_chrome_version": "125",
+  "permissions": ["debugger", "tabs", "tabGroups", "alarms", "storage"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Reins: click to pause or resume agent control" }
+}
