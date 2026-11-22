@@ -309,4 +309,4 @@ node test/bench.js            # hard-task benchmark: accuracy, turns, latency (B
 
 ## License
 
-MIT
+[MIT](LICENSE)
