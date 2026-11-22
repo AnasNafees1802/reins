@@ -83,6 +83,17 @@ try {
   spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},4000)']);
   assert.match(reins('snapshot', { max: 100 }), /^App /m, 'target survives an extension reload');
 
+  // Link URLs are left out of snapshots unless asked for (they were a third of the tokens on real sites).
+  reins('navigate', { tab, url: 'http://localhost:8701/', snapshot: false });
+  assert.doesNotMatch(reins('snapshot', { tab, query: 'Open new tab' }), /→/, 'no hrefs by default');
+  assert.match(reins('snapshot', { tab, query: 'Open new tab', hrefs: true }), /→\/two/, 'hrefs:true shows them');
+
+  // Checkboxes named only by nearby text get that text as their name; a label repeated as text is shown once.
+  const filters = reins('snapshot', { tab, query: 'checkbox|Add to cart' });
+  assert.match(filters, /checkbox "Prime delivery"/, 'unlabelled checkbox named from its wrapper');
+  assert.match(filters, /checkbox "4 stars and up"/);
+  assert.strictEqual(filters.match(/Add to cart/g).length, 1, 'button label not repeated as a text line');
+
   console.log('\nE2E OK');
 } catch (e) {
   console.error('\nE2E FAILED:', e.message);

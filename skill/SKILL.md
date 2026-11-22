@@ -15,8 +15,10 @@ You act inside the user's own browser with their accounts. Treat it like their h
 1. `tabs` (list) to see what is open. The user often already has the right page open. Use it with `tab:<id>`; do not open a new tab for a page that is already there.
 2. `snapshot` to read the page. Every interactive element gets a ref like `e12` (iframes: `f1e5`).
 3. Act with `click` / `type` / `select` / `press` / `upload` using refs.
-4. Read the action's reply. It is a **diff** of what changed (`+` new lines, `-` removed), or a full snapshot if the page navigated. Usually you do NOT need another snapshot.
+4. Read the action's reply. It is a **diff** of what changed (`+` new, `-` removed, `~` changed in place), or a full snapshot if the page navigated. Usually you do NOT need another snapshot.
 5. Repeat. Refs stay stable for the same element until the page navigates.
+
+Actions wait for their own effects: the requests they start (searches, saves, loads) and the DOM updates after them. So the reply to "type in a search box" or "click Save" already shows the results. Do not add a `wait` unless the reply lacks something that takes longer than ~5s.
 
 ## Keep it cheap
 
@@ -26,6 +28,7 @@ Cost is driven by the NUMBER OF TURNS (each turn re-reads the context), not by R
 - Use `query` to pull just the lines you need (`query:"option Indian"`, `query:"Name|Email|button Save"`, where `|` means any of them).
 - Snapshot before screenshot. A snapshot costs about a tenth of a screenshot. Screenshot only for visual questions (layout, charts, images, canvas, captcha-like widgets) or when a snapshot looks empty.
 - Narrow big pages: `query:"invoice"`, `viewport:true`, or `mode:"interactive"`. For reading articles: `mode:"text"`.
+- Snapshots leave out link URLs to save tokens; click the link's ref instead. Need the URLs (to collect links, or open one in a new tab)? `snapshot hrefs:true query:"..."`.
 - Batch typing: `type ref text submit:true` instead of type, then press Enter.
 - `snapshot:false` on actions whose result you do not need to see.
 
@@ -39,11 +42,12 @@ Cost is driven by the NUMBER OF TURNS (each turn re-reads the context), not by R
 ## When something fails
 
 - `Cannot click: covered by <...>`: a modal, cookie banner or overlay is on top. Close it (look for its button in the snapshot) or `press key:"Escape"`. Use `force:true` only when the cover is harmless.
-- `Ref ... is stale`: the page re-rendered. Take a new `snapshot`.
+- After a re-render, Reins finds the same control again by role and name when it can (the reply says "was stale; used e12"). If it still says `Ref ... is stale`, take a new `snapshot`.
+- `iframe fN is not responding`: that frame's page is frozen. Work with the rest of the page; retry later if you need it.
 - Element missing from the snapshot: scroll (`scroll direction:"down"`), use `query`, or take a `screenshot` and `click x y` on the image coordinates.
 - Custom dropdowns (not native `<select>`): click to open, then click the option ref from the diff.
 - Autocomplete fields that ignore pasted text: `type ... slowly:true`.
-- Results load late: `wait text:"Saved"` (or `gone:true`, or `url:"/dashboard"`).
+- Results load later than the action reply (slow jobs, >5s): `wait text:"Saved"` (or `gone:true`, or `url:"/dashboard"`).
 - Need data the DOM hides: `eval code:"return [...document.querySelectorAll('tr')].length"`.
 - `Screenshot timed out`: the tab is in the background and the browser is not rendering it. Use snapshot instead, or `tabs action:"switch"` (this brings the tab to the front, so ask first if the user is working in that window).
 - Error says the user paused control: stop and ask them. Never try to work around a pause.

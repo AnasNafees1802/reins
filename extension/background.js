@@ -73,7 +73,7 @@ chrome.debugger.onEvent.addListener((src, method, p) => {
     setup(s, p.sessionId).catch(() => {});
   } else if (method === 'Target.detachedFromTarget') s.kids.delete(p.sessionId);
   else if (src.sessionId) return; // ponytail: network/console capture covers the top target only, not out-of-process iframes
-  else if (method.startsWith('Network.')) s.net && onNet(s.net, method, p);
+  else if (method.startsWith('Network.')) { inflight(s, method, p); s.net && onNet(s.net, method, p); }
   else if (/^(Runtime\.consoleAPICalled|Runtime\.exceptionThrown|Log\.entryAdded)$/.test(method)) s.cons && onConsole(s, method, p);
   else if (method === 'Page.javascriptDialogOpening') {
     s.dialogs.push(`${p.type} "${p.message.slice(0, 200)}" (auto-accepted)`);
@@ -106,9 +106,11 @@ async function attach(tabId) {
     if (!/already attached/i.test(e.message))
       throw new Error(`Cannot control this tab (${e.message}). Browser pages like chrome://, edge:// and extension stores are off-limits; navigate to a normal site.`);
   }
-  s = { tabId, kids: new Map(), ctx: new Map(), fid: new Map(), fbyn: new Map(), dialogs: [], watching: false, opened: [], last: null, lastOpts: null, shotScale: 1, net: null, cons: null };
+  s = { tabId, kids: new Map(), ctx: new Map(), fid: new Map(), fbyn: new Map(), dialogs: [], watching: false, opened: [], last: null, lastOpts: null, shotScale: 1, net: null, cons: null,
+    fly: new Map(), netT: 0, t0: Date.now() };
   T.set(tabId, s);
   await setup(s);
+  await cdp(tabId, 'Network.enable').catch(() => {}); // settle() waits for the requests an action starts
   await cdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
   return s;
 }
@@ -118,8 +120,19 @@ async function setup(s, sid) {
 }
 async function session(a) {
   const tab = await tabFor(a);
-  return attach(tab.id);
+  const s = await attach(tab.id);
+  s.t0 = Date.now(); // start of this action: requests from here on are ones it caused
+  return s;
 }
+// Requests the current action caused (XHR, fetch, navigations), so settle() can wait for their results.
+function inflight(s, method, p) {
+  if (method === 'Network.requestWillBeSent') {
+    if (!/^(XHR|Fetch|Document)$/.test(p.type) || Date.now() < s.t0 - 100) return;
+    s.fly.set(p.requestId, Date.now());
+    s.netT = Date.now();
+  } else if ((method === 'Network.loadingFinished' || method === 'Network.loadingFailed') && s.fly.delete(p.requestId)) s.netT = Date.now();
+}
+const within = (p, ms) => Promise.race([p, sleep(ms).then(() => { throw new Error('timeout'); })]);
 
 // ---------- frames + isolated worlds ----------
 async function frames(s) {
@@ -135,7 +148,8 @@ async function frames(s) {
     rec(frameTree, true);
   };
   await walk(undefined);
-  for (const sid of s.kids.keys()) await walk(sid).catch(() => {});
+  // A frame whose process is locked up never answers: list it as hung instead of waiting forever.
+  for (const [sid, k] of s.kids) await within(walk(sid), 2000).catch(e => e.message === 'timeout' && out.push({ sid, frameId: k.frameId, hung: true }));
   for (const f of out) {
     if (!s.fid.has(f.frameId)) s.fid.set(f.frameId, s.fid.size);
     f.n = s.fid.get(f.frameId);
@@ -145,15 +159,20 @@ async function frames(s) {
 }
 async function ctx(s, f) {
   let id = s.ctx.get(f.frameId);
-  if (id) {
-    try { await cdp(s.tabId, 'Runtime.evaluate', { expression: '1', contextId: id }, f.sid); return id; } catch {}
-  }
+  if (id) return id;
   ({ executionContextId: id } = await cdp(s.tabId, 'Page.createIsolatedWorld', { frameId: f.frameId, worldName: 'reins', grantUniveralAccess: true }, f.sid));
   s.ctx.set(f.frameId, id);
   return id;
 }
 async function evalIn(s, f, expression) {
-  const r = await cdp(s.tabId, 'Runtime.evaluate', { expression, contextId: await ctx(s, f), returnByValue: true, awaitPromise: true }, f.sid);
+  const run = async () => cdp(s.tabId, 'Runtime.evaluate', { expression, contextId: await ctx(s, f), returnByValue: true, awaitPromise: true }, f.sid);
+  let r;
+  try { r = await run(); }
+  catch (e) { // the cached world died with its document (navigation): make a new one, once
+    if (!/context/i.test(e.message)) throw e;
+    s.ctx.delete(f.frameId);
+    r = await run();
+  }
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   return r.result.value;
 }
@@ -233,6 +252,17 @@ function walker(o) {
     }
     return '';
   }
+  // Last resort for an unnamed field: the text of the closest wrapper that holds no other control
+  // (filter lists like <a><input type=checkbox><span>Prime</span></a>).
+  function nearText(el) {
+    let a = el;
+    for (let i = 0; i < 3 && (a = a.parentElement); i++) {
+      if ([...a.querySelectorAll('input:not([type=hidden]),select,textarea,button,[role=checkbox],[role=radio]')].some(x => x !== el)) return '';
+      const t = clean(a.innerText, 60);
+      if (t) return t;
+    }
+    return '';
+  }
   function attrs(el, k) {
     const a = [], tag = el.localName;
     if (tag === 'input' && !['text', 'checkbox', 'radio', 'submit', 'button', 'file', 'range'].includes(el.type)) a.push(`type=${el.type}`);
@@ -252,7 +282,7 @@ function walker(o) {
     if (ex) a.push(ex === 'true' ? 'expanded' : 'collapsed');
     if (el.getAttribute('aria-selected') === 'true') a.push('selected');
     if (el.required) a.push('required');
-    if (k === 'link') {
+    if (k === 'link' && o.hrefs) { // off by default: URLs were a third of every snapshot, and clicking the ref is enough
       const h = el.getAttribute('href');
       if (h && !/^(javascript:|#$)/.test(h)) a.push('→' + clean(h.replace(location.origin, ''), 60));
     }
@@ -300,6 +330,7 @@ function walker(o) {
         const lab = labelOf(el);
         if (lab && lab !== nm) nm ? (at = `(${lab}) ` + at) : (nm = lab);
       }
+      if (!nm && FIELD.has(k)) nm = nearText(el);
       nc.ctl = nm;
       if (o.mode === 'interactive' && (!nm || nm.startsWith('icon '))) { // say which row an unnamed control belongs to
         const row = el.closest('tr,[role=row],li');
@@ -326,15 +357,20 @@ function walker(o) {
   }
   walk(document.body || document.documentElement, { ptr: false, quiet: false, off: false });
   flush();
-  return { meta, lines };
+  // A text line that only repeats the name of the control next to it (labels rendered beside their button) is noise.
+  const named = l => /^\[[^\]]+\] \w+ "([^"]*)"/.exec(l)?.[1];
+  return { meta, lines: lines.filter((l, i) => l[0] === '[' || (named(lines[i - 1] || '') !== l && named(lines[i + 1] || '') !== l)) };
 }
 
-const SETTLE = `new Promise(r => {
-  let t; const done = () => { o.disconnect(); r(); };
-  const o = new MutationObserver(() => { clearTimeout(t); t = setTimeout(done, 300); });
-  o.observe(document, { subtree: true, childList: true, characterData: true });
-  t = setTimeout(done, 300); setTimeout(done, 1500);
-})`;
+// Page-side change clock for settle(). A node that changes 3+ times while we wait is churn (clock, ticker, animation)
+// and stops counting, so a live page settles as fast as a still one.
+const ARM = `(() => {
+  const M = globalThis.__reinsMut ||= {};
+  M.o?.disconnect();
+  M.last = performance.now(); M.n = new WeakMap();
+  M.o = new MutationObserver(rs => { for (const r of rs) { const c = (M.n.get(r.target) || 0) + 1; M.n.set(r.target, c); if (c < 3) M.last = performance.now(); } });
+  M.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+})()`;
 
 async function collect(s, opts) {
   const fs = await frames(s);
@@ -342,8 +378,15 @@ async function collect(s, opts) {
   let meta = null;
   for (const f of fs) {
     let r;
-    try { r = await evalIn(s, f, `(${walker})(${JSON.stringify({ ...opts, prefix: f.n ? `f${f.n}e` : 'e' })})`); }
-    catch { continue; }
+    const hung = `--- iframe f${f.n} is not responding (its page is busy), skipped ---`;
+    if (f.hung) { out.push(hung); continue; }
+    try {
+      const run = evalIn(s, f, `(${walker})(${JSON.stringify({ ...opts, prefix: f.n ? `f${f.n}e` : 'e' })})`);
+      r = await (f.n ? within(run, 2000) : run);
+    } catch (e) {
+      if (e.message === 'timeout') out.push(hung);
+      continue; // a frame that is detaching or still loading: nothing to read yet
+    }
     if (!f.n) meta = r.meta;
     if (!r.lines.length) continue;
     if (f.n) out.push(`--- iframe f${f.n} ${r.meta.url.slice(0, 80)} ---`);
@@ -365,7 +408,7 @@ function matches(lines, query) {
 }
 async function snapshot(a, s) {
   s ||= await session(a);
-  const opts = { mode: a.mode || 'full', viewport: !!a.viewport };
+  const opts = { mode: a.mode || 'full', viewport: !!a.viewport, hrefs: !!a.hrefs };
   const { meta, lines } = await collect(s, opts);
   if (opts.mode !== 'text') { s.last = lines; s.lastOpts = opts; s.lastUrl = meta?.url; }
   let shown = lines;
@@ -387,7 +430,8 @@ async function report(s, a, note = '') {
     await loaded(id);
     return `${note}Opened new tab ${id}; it is now the target tab.\n` + (a.snapshot === false ? '' : await snapshot({ max: a.max }, await attach(id)));
   }
-  let out = note;
+  let out = note + (s.note || '');
+  s.note = '';
   if (s.dialogs.length) out += 'Dialogs: ' + s.dialogs.splice(0).join('; ') + '\n';
   const errs = s.cons?.filter(l => /^\[(error|exception)\]/.test(l)).length;
   if (errs) out += `Console: ${errs} unread error(s). Read them with console.\n`;
@@ -401,25 +445,56 @@ async function report(s, a, note = '') {
     return out + 'Navigated.\n' + render(meta, lines, a.max || 8000);
   }
   const o = new Set(before), c = new Set(lines);
-  const add = lines.filter(l => !o.has(l)), del = before.filter(l => !c.has(l));
+  let add = lines.filter(l => !o.has(l)), del = before.filter(l => !c.has(l));
   if (!add.length && !del.length) return out + `ok, no visible change | ${meta?.url.slice(0, 120)} scrollY ${meta?.y}`;
   if (add.length + del.length > 80) return out + `Page changed a lot (+${add.length}/-${del.length} lines).\n` + render(meta, lines, a.max || 8000);
-  return out + `ok | changes (+${add.length}/-${del.length}):\n` + [...del.slice(0, 15).map(l => '- ' + l), ...(del.length > 15 ? [`- …${del.length - 15} more removed`] : []), ...add.map(l => '+ ' + l)].join('\n');
+  // A line that changed in place (same ref, or same text apart from numbers) is shown once, as "~ new".
+  const key = l => /^\[((?:f\d+)?e\d+)\]/.exec(l)?.[1] || l.replace(/\d+/g, '#');
+  const gone = new Map();
+  for (const l of del) gone.set(key(l), [...(gone.get(key(l)) || []), l]);
+  const changed = [];
+  add = add.filter(l => { const g = gone.get(key(l)); if (!g?.length) return true; changed.push(l); g.shift(); return false; });
+  del = [...gone.values()].flat();
+  return out + `ok | changes (+${add.length}/-${del.length}/~${changed.length}):\n` + [...del.slice(0, 15).map(l => '- ' + l), ...(del.length > 15 ? [`- …${del.length - 15} more removed`] : []),
+    ...changed.map(l => '~ ' + l), ...add.map(l => '+ ' + l)].join('\n');
+}
+// ref -> "role \"name\"" for every ref in snapshot lines (block controls and links inside sentences)
+function refKeys(lines) {
+  const m = new Map();
+  for (const l of lines) {
+    const b = /^\[((?:f\d+)?e\d+)\] (\w+)(?: "([^"]*)")?/.exec(l);
+    if (b) m.set(b[1], `${b[2]} "${b[3] || ''}"`);
+    for (const x of l.matchAll(/\[((?:f\d+)?e\d+)\]"([^"]*)"/g)) m.set(x[1], `link "${x[2]}"`);
+  }
+  return m;
 }
 
 // ---------- element handles + input ----------
-async function handle(a) {
-  const s = await session(a);
-  const m = /^(?:f(\d+))?e(\d+)$/.exec(String(a.ref || ''));
-  if (!m) throw new Error(`Bad ref "${a.ref}". Use a ref like e12 from the latest snapshot.`);
+async function resolve(s, ref) {
+  const m = /^(?:f(\d+))?e(\d+)$/.exec(ref);
   const f = s.fbyn.get(+(m[1] || 0));
   const id = f && s.ctx.get(f.frameId);
   let r = null;
   if (id) try { r = await cdp(s.tabId, 'Runtime.evaluate', { expression: `globalThis.__reins?.els[${m[2]}]`, contextId: id }, f.sid); } catch {}
   const h = { s, sid: f?.sid, objectId: r?.result?.objectId };
-  if (!h.objectId || !(await call(h, 'function(){return this.isConnected}')))
-    throw new Error(`Ref ${a.ref} is stale (the page changed). Take a new snapshot.`);
-  return h;
+  return h.objectId && await call(h, 'function(){return this.isConnected}').catch(() => false) ? h : null;
+}
+async function handle(a) {
+  const s = await session(a), ref = String(a.ref || '');
+  if (!/^(?:f\d+)?e\d+$/.test(ref)) throw new Error(`Bad ref "${a.ref}". Use a ref like e12 from the latest snapshot.`);
+  const h = await resolve(s, ref);
+  if (h) return h;
+  // The page re-rendered (common in React/Vue): find the same control again by role and name, if exactly one matches
+  // and we are still on the same page. Saves the agent a snapshot turn.
+  const key = refKeys(s.last || []).get(ref);
+  if (key && (await chrome.tabs.get(s.tabId)).url === s.lastUrl) {
+    const { lines } = await collect(s, s.lastOpts || { mode: 'full' });
+    s.last = lines;
+    const hits = [...refKeys(lines)].filter(([, k]) => k === key);
+    const again = hits.length === 1 && await resolve(s, hits[0][0]);
+    if (again) { s.note = `(${ref} was stale after a re-render; used ${hits[0][0]}, the same ${key})\n`; return again; }
+  }
+  throw new Error(`Ref ${a.ref} is stale (the page changed). Take a new snapshot.`);
 }
 async function call(h, fn, args = []) {
   const r = await cdp(h.s.tabId, 'Runtime.callFunctionOn', { objectId: h.objectId, functionDeclaration: fn, arguments: args.map(value => ({ value })), returnByValue: true, awaitPromise: true }, h.sid);
@@ -462,14 +537,13 @@ async function point(h, force) {
   }
   return { x, y };
 }
+// Each input event waits for the page's ack, which a background tab is slow to give (up to a frame each). The
+// debugger keeps commands in order, so send them all and wait once.
 async function mouse(s, x, y, { button = 'left', clicks = 1, move = false } = {}) {
-  await cdp(s.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-  if (move) return;
+  const ev = [{ type: 'mouseMoved', x, y }];
   const buttons = { left: 1, right: 2, middle: 4 }[button];
-  for (let i = 1; i <= clicks; i++) {
-    await cdp(s.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount: i });
-    await cdp(s.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount: i });
-  }
+  if (!move) for (let i = 1; i <= clicks; i++) ev.push({ type: 'mousePressed', x, y, button, buttons, clickCount: i }, { type: 'mouseReleased', x, y, button, buttons: 0, clickCount: i });
+  await Promise.all(ev.map(e => cdp(s.tabId, 'Input.dispatchMouseEvent', e)));
 }
 const KEYS = { Enter: [13, '\r'], Tab: [9], Escape: [27], Backspace: [8], Delete: [46], ArrowUp: [38], ArrowDown: [40], ArrowLeft: [37], ArrowRight: [39], Home: [36], End: [35], PageUp: [33], PageDown: [34], Insert: [45], ' ': [32, ' '] };
 const MODS = { Alt: [1, 18], Control: [2, 17], Ctrl: [2, 17], Meta: [4, 91], Cmd: [4, 91], Shift: [8, 16] };
@@ -503,25 +577,36 @@ async function press(s, combo) {
   await cdp(s.tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...ev });
   for (const p of parts.reverse()) await cdp(s.tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: p, windowsVirtualKeyCode: MODS[p[0].toUpperCase() + p.slice(1).toLowerCase()][1], modifiers: 0 });
 }
-async function settle(s) {
-  await sleep(150);
-  for (let i = 0; i < 100; i++) {
+// Wait until the action's effects are on screen: the page is loaded, the requests it started have answered, and the
+// DOM (minus churn) has been still for q ms. q is longer after typing, to catch debounced searches.
+// ponytail: requests open longer than 3s (long-polling, streams) stop counting, and the whole wait caps at 5s.
+async function settle(s, q = 200) {
+  const end = Date.now() + 5000;
+  let f = null, armed = false;
+  for (; Date.now() < end; await sleep(50)) {
     const t = await chrome.tabs.get(s.tabId).catch(() => null);
-    if (!t || t.status === 'complete') break;
-    await sleep(100);
+    if (!t) return;
+    const now = Date.now();
+    if (t.status !== 'complete' || [...s.fly.values()].some(st => now - st < 3000)) { armed = false; continue; }
+    try {
+      f ||= await topFrame(s);
+      if (!armed) { await evalIn(s, f, ARM); armed = true; continue; }
+      const still = await evalIn(s, f, 'performance.now() - globalThis.__reinsMut.last');
+      if (still >= q && now - s.netT >= q) break;
+    } catch { f = null; armed = false; } // a new document is loading
   }
-  try { await evalIn(s, await topFrame(s), SETTLE); } catch {}
+  if (f) await evalIn(s, f, 'globalThis.__reinsMut?.o?.disconnect()').catch(() => {}); // stop observing; the page may already be gone
 }
 async function loaded(tabId, timeout = 30000) {
-  const end = Date.now() + timeout;
-  await sleep(200);
+  const t0 = Date.now(), end = t0 + timeout;
+  await sleep(100);
   while (Date.now() < end) {
     const t = await chrome.tabs.get(tabId);
     if (t.status === 'complete') break;
-    await sleep(150);
+    await sleep(100);
   }
   const s = await attach(tabId).catch(() => null);
-  if (s) await settle(s);
+  if (s) { s.t0 = t0; await settle(s); }
   return s;
 }
 async function group(tabId) {
@@ -696,7 +781,7 @@ const TOOLS = {
       else await cdp(s.tabId, 'Input.insertText', { text: a.text });
     }
     if (a.submit) await press(s, 'Enter');
-    await settle(s);
+    await settle(s, 500); // longer quiet window: search boxes usually debounce 250-500ms before fetching
     return report(s, a);
   },
 
@@ -821,8 +906,7 @@ const TOOLS = {
       return `Recording network on tab ${s.tabId}${a.reload ? ' (reloaded)' : ''}. List requests with network {}.`;
     }
     if (act === 'stop') {
-      s.net = null;
-      await cdp(s.tabId, 'Network.disable').catch(() => {});
+      s.net = null; // the Network domain stays on: settle() uses it
       return 'Stopped recording network.';
     }
     if (act === 'get') {

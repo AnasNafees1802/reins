@@ -236,7 +236,7 @@ const TOOLS = [
   tool('snapshot', 'Compact page outline: text plus [ref] lines for interactive elements, across iframes and shadow DOM. Cheaper than a screenshot.', {
     mode: { type: 'string', enum: ['full', 'interactive', 'text'], description: 'interactive = refs only; text = readable page text' },
     viewport: { type: 'boolean', description: 'Only what is on screen' }, query: { type: 'string', description: 'Only lines containing these words' },
-    max: { type: 'number', description: 'Char budget, default 8000' } }),
+    max: { type: 'number', description: 'Char budget, default 8000' }, hrefs: { type: 'boolean', description: 'Show link URLs (off by default to save tokens)' } }),
   tool('click', 'Real mouse click on a ref (scrolls into view, checks nothing covers it) or at x,y of the last screenshot.', {
     ref, x: { type: 'number' }, y: { type: 'number' }, double: { type: 'boolean' }, button: { type: 'string', enum: ['left', 'right', 'middle'] },
     force: { type: 'boolean', description: 'Click even if covered' }, snapshot: after }),

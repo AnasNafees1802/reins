@@ -9,6 +9,7 @@ Agent:  reads the page you're already signed into, calls GitHub's own endpoints,
 
 - **Works where you're logged in.** Gmail, Jira, Salesforce, your admin panel, any internal tool behind SSO. If you can see it, your agent can use it.
 - **Cheap to run.** Pages come back as a compact text outline, and every action replies with only what changed. A 22-step real task cost $0.16 on Opus 5.5 (numbers below).
+- **Fast, and right the first time.** A click returns in well under half a second, already showing the result of the search or save it triggered. On our hard-case benchmark, agents finish every task in the minimum number of turns.
 - **Calls the site's own API.** Reins records a page's requests and replays them as you, so a hundred clicks can become one call.
 - **Waits without burning tokens.** Background watches tell your agent when a deploy finishes, a reply lands or a price moves.
 - **Several agents at once.** Each agent session gets its own tab. Agents never take over each other's tab, or yours.
@@ -124,7 +125,7 @@ Reins is built for agents doing real work in your accounts. For headless test su
 |---|---|
 | `tabs` | List, open, switch or close tabs. Marks your agent's own tab and tabs other agents are using. |
 | `navigate` | Open a URL, go back or forward, reload. |
-| `snapshot` | Compact page outline with stable refs (`e12`, `f1e5` in iframes). Covers shadow DOM and cross-site iframes. Filter with `query`. |
+| `snapshot` | Compact page outline with stable refs (`e12`, `f1e5` in iframes). Covers shadow DOM and cross-site iframes. Filter with `query`; add `hrefs:true` for link URLs. |
 | `click` | Real mouse click on a ref, after checking nothing covers it. Or click at x,y on a screenshot. |
 | `type` | Type into a field. `submit:true` presses Enter; `slowly:true` for picky autocomplete widgets. |
 | `press` | Keys and shortcuts: `Enter`, `Escape`, `Control+a`. |
@@ -194,9 +195,50 @@ agent ──MCP/CLI──> reins daemon (127.0.0.1:17333) <──WebSocket──
 - The extension uses `chrome.debugger` (the Chrome DevTools Protocol). Clicks and keystrokes are real input events, so sites treat them as a real user.
 - Pages are read as a compact outline with stable refs, including shadow DOM and cross-site iframes.
 - After each action the agent gets only what changed on the page, so it rarely needs a second read.
+- Each action waits for its own effects: the requests it started and the DOM updates after them. A search box or a Save button replies with the results, not a blank diff followed by a `wait`. Elements that change on their own (clocks, tickers, ads) are ignored, so live pages are as fast as still ones.
+- If a React or Vue page re-renders between snapshot and click, Reins finds the same control again by role and name instead of failing.
+- A frozen iframe is skipped after 2 seconds instead of hanging the whole read.
+- Unlabelled fields get a name from the text beside them, so a filter list of checkboxes reads as "Prime delivery", "4 stars and up" instead of a column of anonymous boxes.
 - `batch` runs a whole form plus Save in one call. Fewer turns is the biggest cost saver.
 
 The toolbar badge shows **ON** when connected. Click the icon to pause or resume agent control.
+
+## Benchmark
+
+What makes a browser agent expensive is not the size of one reply. It is the extra turns: a reply that comes back before the search results load, a click on an element that just re-rendered, a page read that hangs on a frozen ad frame. Each one costs a full model round trip.
+
+`node test/bench.js` measures exactly that. It runs 9 hard tasks against local test pages and plays the agent: whenever a reply misses the result a task needs, it spends a recovery turn, the way a real agent would.
+
+- A search box that waits 300 ms after typing, then calls an API that takes 700 ms
+- A list that re-renders between the snapshot and the click
+- A custom (non-native) dropdown
+- A confirm dialog in front of a save that takes 600 ms
+- A cross-site iframe whose page is frozen
+
+The first four run twice: on a still page, and on a page with a clock that changes every 100 ms, like the ads, tickers and live counters on real sites.
+
+| | Before | Now (Chrome) | Now (Edge) |
+|---|---|---|---|
+| Tasks passed | 8 of 9 | 9 of 9 | 9 of 9 |
+| Agent turns (9 is the minimum) | 13 | 9 | 9 |
+| Click, page with a live clock (median) | 2.23 s | 0.65 s | 0.67 s |
+| Click, still page (median) | 1.06 s | 0.56 s | 0.57 s |
+| Reading a page with a frozen iframe | failed after 60 s | 2 s | 2 s |
+| Total time inside Reins | 107 s | 22 s | 23 s |
+
+Click times are measured from the CLI and include about 0.34 s of process startup that MCP calls do not pay, so an agent over MCP sees roughly 0.3 to 0.4 s per click.
+
+### Snapshot size on real sites
+
+Full-page snapshot, before and after leaving out link URLs (still available with `hrefs:true`), naming unlabelled fields and dropping labels repeated as text:
+
+| Page | Before | Now | Smaller by |
+|---|---|---|---|
+| Hacker News front page | 8,691 chars | 6,030 chars | 31% |
+| GitHub repository page | 23,505 chars | 15,995 chars | 32% |
+| Amazon search results | 40,330 chars | 23,976 chars | 41% |
+
+The whole Hacker News front page now fits in one default reply. On the Amazon page, all 91 filter checkboxes went from unnamed to named.
 
 ## Cost
 
@@ -243,6 +285,9 @@ No. Reins never types a password unless you give it one for that purpose. On a l
 **How is this different from Playwright MCP or browser-use?**
 Those tools usually launch their own browser profile, so the agent starts logged out. Reins drives the browser you already use, with your sessions, and adds API replay, console capture, background watches and parallel agent tabs.
 
+**How fast is it?**
+A click over MCP returns in about 0.3 to 0.4 seconds on a normal page, including waiting for the page to settle. If the click starts a request, like a search or a save, Reins waits for the answer (up to 5 seconds) so the reply already shows the result. See the benchmark above.
+
 **Can I keep using the browser while the agent works?**
 Yes. Agents work in their own tabs. If you need the agent to stop, click the toolbar icon.
 
@@ -257,9 +302,10 @@ Yes, MIT licensed. Reins itself makes no network calls outside your machine.
 ```
 node test/fixture.js          # local test pages on :8701 and :8702
 node test/e2e.js              # end-to-end check against your connected browser
+node test/bench.js            # hard-task benchmark: accuracy, turns, latency (BENCH_BROWSER=edge to pick a browser)
 ```
 
-`test/e2e.js` covers network recording, masking and replay (same-site and cross-origin), console capture, watches (text, query, run, per-agent isolation) and tab ownership across an extension reload.
+`test/e2e.js` covers network recording, masking and replay (same-site and cross-origin), console capture, watches (text, query, run, per-agent isolation), tab ownership across an extension reload, field naming and link URL opt-in. Both scripts start their own fixture server, so stop any `test/fixture.js` you left running first, or it will serve stale pages on ports 8701 and 8702. After editing `extension/`, run `reins install extension=false`: it copies the extension to `~/.reins/extension` and reloads it in every connected browser.
 
 ## License
 
