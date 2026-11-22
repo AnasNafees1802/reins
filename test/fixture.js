@@ -26,6 +26,33 @@ const page = `<!doctype html><title>Reins Fixture</title>
 customElements.define('my-comp', class extends HTMLElement { constructor(){ super(); this.attachShadow({mode:'open'}).innerHTML = '<button onclick="this.textContent=\\'shadow ok\\'">Shadow button</button>'; } });
 </script>`;
 const frame = `<!doctype html><body><input id=fi placeholder="In frame"><button onclick="document.body.append(' frame clicked: '+fi.value)">Frame button</button></body>`;
-http.createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end(q.url === '/two' ? '<title>Two</title><h1>Second page</h1>' : page); }).listen(8701);
-http.createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end(frame); }).listen(8702);
+// /app: an SPA that calls its own API with a bearer token and logs a console error (network + console tests).
+const app = `<!doctype html><title>App</title><h1>App</h1><ul id=list><li>Item one, 1 minute ago</li></ul><script>
+console.error('boom from app');
+fetch('/api/items?page=1', { headers: { authorization: 'Bearer sekret-token', 'x-fetch-nonce': 'nonce-sekret' } }).then(r => r.json()).then(j => document.title = 'App ' + j.items.length);
+fetch('/api/missing');
+fetch('http://localhost:8702/api/public', { method: 'POST', body: 'q=one' });
+</script>`;
+http.createServer((q, r) => {
+  if (q.url.startsWith('/api/items')) {
+    r.setHeader('content-type', 'application/json');
+    if (q.headers.authorization !== 'Bearer sekret-token') { r.statusCode = 401; return r.end('{"error":"no auth"}'); }
+    return r.end(JSON.stringify({ page: new URL(q.url, 'http://x').searchParams.get('page'), items: ['a', 'b'] }));
+  }
+  if (q.url === '/api/missing') { r.statusCode = 404; return r.end('nope'); }
+  r.setHeader('content-type', 'text/html');
+  r.end(q.url === '/two' ? '<title>Two</title><h1>Second page</h1>' : q.url === '/app' ? app : page);
+}).listen(8701);
+http.createServer(async (q, r) => {
+  // a public cross-origin API: ACAO "*" means the browser blocks the response if credentials were included
+  if (q.url === '/api/public') {
+    let body = '';
+    for await (const c of q) body += c;
+    r.setHeader('access-control-allow-origin', '*');
+    r.setHeader('content-type', 'application/json');
+    return r.end(JSON.stringify({ echo: body }));
+  }
+  r.setHeader('content-type', 'text/html');
+  r.end(frame);
+}).listen(8702);
 console.log('fixture on 8701/8702');

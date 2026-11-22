@@ -5,6 +5,8 @@ const PORT = 17333; // ponytail: fixed port, must match extension/background.js
 const EXT_ID = 'ggjpcidlnhbhdjajedgegjcnpnialhco'; // pinned by the "key" in extension/manifest.json
 const DIR = path.join(os.homedir(), '.reins');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const NO_EVENTS = 'No watch events yet.';
+const RELATIVE_TIME = /\b(\d+|an?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|[smhdwy])\s+ago\b|\bjust now\b/gi;
 // Who is calling. Each MCP server process is one agent session, so it gets its own id (and its own tab).
 // CLI calls share "cli" unless REINS_AGENT is set.
 let AGENT = process.env.REINS_AGENT || 'cli';
@@ -25,6 +27,110 @@ function serve() {
   const pick = (name, agent) => name
     ? browsers.find(b => b.name === name) || browsers.find(b => b.name.startsWith(name))
     : browsers.includes(last.get(agent)) ? last.get(agent) : browsers[0];
+  const ask = (b, tool, args, agent, ms = 60000) => new Promise(resolve => {
+    const id = ++seq;
+    const t = setTimeout(() => { b.pending.delete(id); resolve({ error: `Timed out after ${ms / 1000}s` }); }, ms);
+    b.pending.set(id, m => { clearTimeout(t); resolve(m); });
+    b.ws.send(JSON.stringify({ id, tool, args, agent }));
+  });
+  const noBrowser = name => browsers.length
+    ? `No browser "${name}". Connected: ${browsers.map(x => x.name).join(', ')}`
+    : 'No browser connected. Open Chrome or Edge with the Reins extension installed (toolbar badge shows ON).';
+
+  // ---------- watchers: poll a tab, queue an event when it changes, optionally run a command ----------
+  // ponytail: watchers live in daemon memory, so a daemon restart drops them (tab ids do not survive a browser restart anyway).
+  const watches = new Map(), events = [], waiters = [];
+  let wseq = 0;
+  const describe = w => w.text ? `text "${w.text}" to ${w.gone ? 'disappear' : 'appear'}`
+    : w.query ? `changes in lines matching "${w.query}"` : 'any change in the page text';
+  const drop = w => { clearInterval(w.timer); watches.delete(w.id); };
+  function fire(w, url, detail) {
+    const at = new Date().toISOString();
+    const ev = { watch: w.id, agent: w.agent, name: w.name, tab: w.tab, url, at, text: `watch ${w.id}${w.name ? ` "${w.name}"` : ''} fired on tab ${w.tab} (${url}) at ${at}:\n${detail}` };
+    console.log(at, 'watch fired', w.id);
+    events.push(ev);
+    if (events.length > 100) events.shift();
+    [...waiters].forEach(f => f());
+    if (w.run) {
+      // The event holds page content: hand it over as a file, never inside the command line (cmd.exe would expand and parse it).
+      const f = path.join(DIR, 'events', `${w.id}-${Date.now()}.json`);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify(ev, null, 2));
+      require('child_process').spawn(w.run, { shell: true, stdio: 'inherit', windowsHide: true, env: { ...process.env, REINS_EVENT_FILE: f } })
+        .on('error', e => console.log(at, 'watch run failed', w.id, e.message));
+    }
+    if (w.once) drop(w);
+  }
+  function see(w, { url, lines }) {
+    if (w.text) {
+      const hit = lines.join('\n').includes(w.text) !== !!w.gone;
+      if (hit && !w.prev) fire(w, url, `text "${w.text}" ${w.gone ? 'disappeared' : 'appeared'}`);
+      w.prev = hit;
+      return;
+    }
+    // Compare with relative times ("3 minutes ago") blanked: they tick on their own and would fire every check.
+    const now = new Map(lines.map(l => [l.replace(RELATIVE_TIME, 'ago'), l]));
+    if (w.prev) {
+      const add = [...now].filter(([k]) => !w.prev.has(k)).map(([, l]) => l), del = [...w.prev].filter(([k]) => !now.has(k)).map(([, l]) => l);
+      if (add.length || del.length) fire(w, url, [...del.slice(0, 20).map(l => '- ' + l), ...add.slice(0, 40).map(l => '+ ' + l)].join('\n'));
+    }
+    w.prev = now;
+  }
+  async function check(w) {
+    if (w.busy) return;
+    w.busy = true;
+    try {
+      const b = browsers.find(x => x.name === w.browser);
+      if (!b) throw new Error(`browser ${w.browser} is not connected`);
+      const r = await ask(b, 'probe', { tab: w.tab, query: w.query, reload: w.reload }, 'watch');
+      if (r.error) throw new Error(r.error);
+      w.checks++;
+      w.error = null;
+      see(w, r.result);
+    } catch (e) {
+      w.error = e.message;
+      if (/not found/.test(e.message)) { w.once = true; fire(w, '', `stopped watching: ${e.message}`); }
+    } finally { w.busy = false; }
+  }
+  async function watch(msg) {
+    const a = msg.args || {}, act = a.action || 'list';
+    if (act === 'add') {
+      if (a.gone && !a.text) return { error: 'gone needs text.' };
+      const b = pick(msg.browser, msg.agent);
+      if (!b) return { error: noBrowser(msg.browser) };
+      const r = await ask(b, 'probe', { tab: a.tab, query: a.query }, msg.agent);
+      if (r.error) return r;
+      const every = Math.max(2, +a.every || 60);
+      const w = { id: 'w' + ++wseq, name: a.name, browser: b.name, tab: r.result.tab, text: a.text, gone: !!a.gone, query: a.query,
+        every, reload: !!a.reload, once: a.once !== false, run: a.run, checks: 1, prev: null, agent: msg.agent };
+      watches.set(w.id, w);
+      see(w, r.result); // baseline; a text condition that already holds fires right away
+      if (watches.has(w.id)) w.timer = setInterval(() => check(w), every * 1000);
+      return { result: `Watching ${w.id}${w.name ? ` "${w.name}"` : ''} on tab ${w.tab} every ${every}s for ${describe(w)}${w.once ? ' (once)' : ''}.${watches.has(w.id) ? '' : ' It fired already.'} Get events with watch {action:"wait"}.` };
+    }
+    // Each agent sees only its own watches and events, so parallel agents never take each other's.
+    const mine = () => events.filter(e => e.agent === msg.agent), own = [...watches.values()].filter(w => w.agent === msg.agent);
+    if (act === 'wait') {
+      const end = Date.now() + Math.min(+a.timeout || 240000, 240000); // the client loops for longer waits
+      while (!mine().length && Date.now() < end) await new Promise(r => {
+        const f = () => { clearTimeout(t); waiters.splice(waiters.indexOf(f) >>> 0, 1); r(); };
+        const t = setTimeout(f, end - Date.now());
+        waiters.push(f);
+      });
+      const got = mine();
+      got.forEach(e => events.splice(events.indexOf(e), 1));
+      return { result: got.length ? got.map(e => e.text).join('\n\n') : NO_EVENTS };
+    }
+    if (act === 'remove') {
+      const hit = own.filter(w => a.all || w.id === a.id || (a.name && w.name === a.name));
+      hit.forEach(drop);
+      return { result: `Removed ${hit.length} watch(es).` };
+    }
+    if (act !== 'list') return { error: `Unknown action "${act}". Use add, list, wait or remove.` };
+    const lines = own.map(w => `${w.id}${w.name ? ` "${w.name}"` : ''} tab ${w.tab} (${w.browser}) every ${w.every}s: ${describe(w)}${w.once ? ' (once)' : ''}${w.reload ? ', reloads' : ''}${w.run ? `, runs: ${w.run}` : ''} | ${w.checks} checks${w.error ? ` | last error: ${w.error}` : ''}`);
+    const n = mine().length;
+    return { result: (lines.join('\n') || 'No watches.') + (n ? `\n${n} event(s) waiting: watch {action:"wait"}` : '') };
+  }
 
   const server = http.createServer(async (req, res) => {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
@@ -36,17 +142,12 @@ function serve() {
     for await (const c of req) body += c;
     let msg;
     try { msg = JSON.parse(body); } catch { return reply(400, { error: 'bad json' }); }
+    if (msg.tool === 'watch') return reply(200, await watch(msg));
+    if (msg.tool === 'probe') return reply(200, { error: 'probe is internal' });
     const b = pick(msg.browser, msg.agent);
-    if (!b) return reply(200, { error: browsers.length
-      ? `No browser "${msg.browser}". Connected: ${browsers.map(x => x.name).join(', ')}`
-      : 'No browser connected. Open Chrome or Edge with the Reins extension installed (toolbar badge shows ON).' });
+    if (!b) return reply(200, { error: noBrowser(msg.browser) });
     last.set(msg.agent, b);
-    const id = ++seq, ms = (msg.args?.timeout || 0) + 60000;
-    reply(200, await new Promise(resolve => {
-      const t = setTimeout(() => { b.pending.delete(id); resolve({ error: `Timed out after ${ms / 1000}s` }); }, ms);
-      b.pending.set(id, m => { clearTimeout(t); resolve(m); });
-      b.ws.send(JSON.stringify({ id, tool: msg.tool, args: msg.args || {}, agent: msg.agent }));
-    }));
+    reply(200, await ask(b, msg.tool, msg.args || {}, msg.agent, (msg.args?.timeout || 0) + 60000));
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 << 20 });
@@ -103,10 +204,15 @@ async function ensureDaemon() {
 async function callTool(tool, args) {
   const { browser, ...rest } = args;
   let st = await ensureDaemon();
+  const daemonOnly = tool === 'watch' && rest.action !== 'add';
   // A sleeping extension reconnects on its 30s alarm; wait for it instead of failing the first call.
-  for (let i = 0; !st.browsers.length && i < 70; i++) { await sleep(500); st = await request('/status'); }
+  for (let i = 0; !daemonOnly && !st.browsers.length && i < 70; i++) { await sleep(500); st = await request('/status'); }
   const t0 = Date.now();
-  const r = await request('/call', { tool, args: rest, browser, agent: AGENT });
+  // watch wait: the daemon holds each request up to 4 minutes, so loop for longer waits (timeout 0 = until an event).
+  const wait = tool === 'watch' && rest.action === 'wait', end = rest.timeout === 0 ? Infinity : t0 + (rest.timeout ?? 60000);
+  let r;
+  do r = await request('/call', { tool, args: wait ? { ...rest, timeout: Math.min(end - Date.now(), 240000) } : rest, browser, agent: AGENT });
+  while (wait && r.result === NO_EVENTS && Date.now() < end - 1000);
   const out = r.error ? { text: 'Error: ' + r.error } : typeof r.result === 'string' ? { text: r.result } : r.result;
   if (process.env.REINS_METER) // per-call usage log for cost tracking of long-running agents
     fs.appendFileSync(process.env.REINS_METER, JSON.stringify({ ts: t0, ms: Date.now() - t0, tool, args: rest, text: out.text, image: !!out.image, imageBytes: out.image?.length }) + '\n');
@@ -153,6 +259,22 @@ const TOOLS = [
     steps: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' } }, required: ['tool'] } }, snapshot: after }, ['steps']),
   tool('wait','Wait until text appears (or is gone) or the URL contains a string; or sleep ms.', {
     text: { type: 'string' }, gone: { type: 'boolean' }, url: { type: 'string' }, ms: { type: 'number' }, timeout: { type: 'number' }, snapshot: after }),
+  tool('network', "Record the tab's XHR/fetch calls, read one (credential headers masked), and replay it with changes. Replay calls the site's own API as the user, often one call instead of many clicks.", {
+    action: { type: 'string', enum: ['start', 'list', 'get', 'replay', 'stop'], description: 'start (reload:true catches page-load calls), list (default), get id, replay id, stop' },
+    id: { type: 'number', description: 'Request # from list' }, reload: { type: 'boolean' }, query: { type: 'string', description: 'list: only matching lines' },
+    all: { type: 'boolean', description: 'list: include documents, scripts, images' },
+    url: { type: 'string', description: 'replay: another URL' }, method: { type: 'string', description: 'replay: another method' },
+    body: { description: 'replay: new body (string or JSON)' }, headers: { type: 'object', description: 'replay: headers to add or override' }, max: { type: 'number' } }),
+  tool('console', "Capture the tab's console messages, uncaught exceptions and failed loads. start first; read (default) returns what arrived since the last read.", {
+    action: { type: 'string', enum: ['start', 'read', 'stop'] }, max: { type: 'number' } }),
+  tool('watch', 'Watch a tab in the background and queue an event when text appears or disappears, or when lines matching query change. wait blocks until an event arrives.', {
+    action: { type: 'string', enum: ['add', 'list', 'wait', 'remove'] }, text: { type: 'string' }, gone: { type: 'boolean', description: 'Fire when text disappears' },
+    query: { type: 'string', description: 'Only watch lines with these words (a|b = either)' }, every: { type: 'number', description: 'Seconds between checks, default 60' },
+    reload: { type: 'boolean', description: 'Reload the tab before each check, for pages that do not update live' },
+    once: { type: 'boolean', description: 'Remove after the first event (default true)' }, name: { type: 'string' },
+    id: { type: 'string', description: 'remove: watch id' }, all: { type: 'boolean', description: 'remove: all watches' },
+    timeout: { type: 'number', description: 'wait: ms, default 60000; 0 = until an event' },
+    run: { type: 'string', description: 'CLI only: shell command to run on each event; it gets REINS_EVENT_FILE' } }),
 ];
 
 // ---------- MCP stdio server ----------
@@ -172,6 +294,8 @@ function mcp() {
     if (method === 'ping') return out({ id, result: {} });
     if (method === 'tools/call') {
       try {
+        // A watch command runs a shell on the user's machine: only the user sets that up, from the CLI.
+        if (params.name === 'watch' && params.arguments?.run) throw new Error('run is CLI only. Give the user the command to run in a terminal: reins watch action=add ... run="..."');
         const r = await callTool(params.name, params.arguments || {});
         const content = [{ type: 'text', text: r.text || '' }];
         if (r.image) content.push({ type: 'image', data: r.image, mimeType: 'image/jpeg' });

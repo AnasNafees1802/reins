@@ -3,6 +3,13 @@ const PORT = 17333; // ponytail: fixed port, must match bin/reins.js
 const T = new Map(); // tabId -> tab state
 let ws = null, paused = false;
 const cur = new Map(); // agent id -> that agent's target tab, so parallel agents never share or steal a tab
+// Persisted: an extension reload or worker restart must not drop an agent onto the user's active tab.
+// Local, not session storage, because session storage is wiped by an extension reload.
+const saveCur = () => chrome.storage.local.set({ cur: [...cur] });
+cur.set = (k, v) => { Map.prototype.set.call(cur, k, v); saveCur(); return cur; };
+cur.delete = k => { const had = Map.prototype.delete.call(cur, k); if (had) saveCur(); return had; };
+const curReady = chrome.storage.local.get('cur').then(v => (v.cur || []).forEach(([k, t]) => Map.prototype.set.call(cur, k, t)));
+chrome.runtime.onStartup.addListener(() => curReady.then(() => { cur.clear(); saveCur(); })); // new browser session: old tab ids may be reused
 const owner = (tabId, me) => [...cur].find(([k, v]) => v === tabId && k !== me)?.[0];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cdp = (tabId, method, params = {}, sessionId) =>
@@ -28,6 +35,7 @@ async function onMsg(m) {
     if (paused) throw new Error('The user paused agent control in this browser (Reins toolbar icon). Ask them to resume.');
     const fn = TOOLS[m.tool];
     if (!fn) throw new Error(`Unknown tool "${m.tool}"`);
+    await curReady;
     send({ id: m.id, result: await fn({ ...(m.args || {}), agent: m.agent || 'default' }) });
   } catch (e) {
     send({ id: m.id, error: String(e?.message || e) });
@@ -64,6 +72,9 @@ chrome.debugger.onEvent.addListener((src, method, p) => {
     s.kids.set(p.sessionId, { parent: src.sessionId, frameId: p.targetInfo.targetId });
     setup(s, p.sessionId).catch(() => {});
   } else if (method === 'Target.detachedFromTarget') s.kids.delete(p.sessionId);
+  else if (src.sessionId) return; // ponytail: network/console capture covers the top target only, not out-of-process iframes
+  else if (method.startsWith('Network.')) s.net && onNet(s.net, method, p);
+  else if (/^(Runtime\.consoleAPICalled|Runtime\.exceptionThrown|Log\.entryAdded)$/.test(method)) s.cons && onConsole(s, method, p);
   else if (method === 'Page.javascriptDialogOpening') {
     s.dialogs.push(`${p.type} "${p.message.slice(0, 200)}" (auto-accepted)`);
     cdp(src.tabId, 'Page.handleJavaScriptDialog', { accept: true, promptText: p.defaultPrompt || '' }, src.sessionId).catch(() => {});
@@ -95,7 +106,7 @@ async function attach(tabId) {
     if (!/already attached/i.test(e.message))
       throw new Error(`Cannot control this tab (${e.message}). Browser pages like chrome://, edge:// and extension stores are off-limits; navigate to a normal site.`);
   }
-  s = { tabId, kids: new Map(), ctx: new Map(), fid: new Map(), fbyn: new Map(), dialogs: [], watching: false, opened: [], last: null, lastOpts: null, shotScale: 1 };
+  s = { tabId, kids: new Map(), ctx: new Map(), fid: new Map(), fbyn: new Map(), dialogs: [], watching: false, opened: [], last: null, lastOpts: null, shotScale: 1, net: null, cons: null };
   T.set(tabId, s);
   await setup(s);
   await cdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
@@ -347,6 +358,11 @@ function render(meta, lines, max) {
   const head = meta ? `${meta.title.slice(0, 80)} | ${meta.url.slice(0, 150)} | viewport ${meta.W}x${meta.H}, scrollY ${meta.y}/${meta.h}\n` : '';
   return head + text;
 }
+// "a|b" = any alternative; within one alternative, all words must appear
+function matches(lines, query) {
+  const alts = query.toLowerCase().split('|').map(s => s.trim().split(/\s+/)).filter(w => w[0]);
+  return lines.filter(l => { const L = l.toLowerCase(); return alts.some(ws => ws.every(w => L.includes(w))); });
+}
 async function snapshot(a, s) {
   s ||= await session(a);
   const opts = { mode: a.mode || 'full', viewport: !!a.viewport };
@@ -354,9 +370,7 @@ async function snapshot(a, s) {
   if (opts.mode !== 'text') { s.last = lines; s.lastOpts = opts; s.lastUrl = meta?.url; }
   let shown = lines;
   if (a.query) {
-    // "a|b" = any alternative; within one alternative, all words must appear
-    const alts = a.query.toLowerCase().split('|').map(s => s.trim().split(/\s+/)).filter(w => w[0]);
-    shown = lines.filter(l => { const L = l.toLowerCase(); return alts.some(ws => ws.every(w => L.includes(w))); });
+    shown = matches(lines, a.query);
     if (!shown.length) return render(meta, [], 1) + `No lines match "${a.query}" (${lines.length} lines total).`;
   }
   return render(meta, shown, a.max || 8000);
@@ -375,6 +389,8 @@ async function report(s, a, note = '') {
   }
   let out = note;
   if (s.dialogs.length) out += 'Dialogs: ' + s.dialogs.splice(0).join('; ') + '\n';
+  const errs = s.cons?.filter(l => /^\[(error|exception)\]/.test(l)).length;
+  if (errs) out += `Console: ${errs} unread error(s). Read them with console.\n`;
   if (a.snapshot === false) return out + 'ok';
   if (a.snapshot === true || !s.last) return out + await snapshot({ max: a.max }, s);
   const before = s.last;
@@ -522,6 +538,51 @@ function fmt(v, max = 4000) {
   return t.length > max ? t.slice(0, max) + `…(${t.length} chars)` : t;
 }
 
+// ---------- network + console capture ----------
+function onNet(n, method, p) {
+  if (method === 'Network.requestWillBeSent') {
+    const prev = n.rid.get(p.requestId);
+    if (prev && p.redirectResponse) { prev.status = p.redirectResponse.status; prev.done = true; }
+    const e = { n: ++n.seq, rid: p.requestId, method: p.request.method, url: p.request.url, type: p.type, headers: p.request.headers, post: p.request.postData, hasPost: p.request.hasPostData };
+    n.rid.set(p.requestId, e);
+    n.list.push(e);
+    if (n.list.length > 300) { const old = n.list.shift(); if (n.rid.get(old.rid) === old) n.rid.delete(old.rid); }
+    return;
+  }
+  const e = n.rid.get(p.requestId);
+  if (!e) return;
+  if (method === 'Network.responseReceived') {
+    e.status = p.response.status; e.mime = p.response.mimeType;
+    e.acac = Object.entries(p.response.headers || {}).some(([k, v]) => /^access-control-allow-credentials$/i.test(k) && v === 'true');
+  }
+  else if (method === 'Network.loadingFinished') { e.done = true; e.size = p.encodedDataLength; }
+  else if (method === 'Network.loadingFailed') { e.done = true; e.failed = p.canceled ? 'canceled' : p.errorText; }
+}
+function onConsole(s, method, p) {
+  let line;
+  if (method === 'Runtime.consoleAPICalled') {
+    const f = p.stackTrace?.callFrames?.[0];
+    line = `[${p.type === 'warning' ? 'warn' : p.type}] ${p.args.map(v => v.value ?? v.unserializableValue ?? v.description ?? v.type).join(' ')}${f?.url ? ` (${f.url.split('/').pop()}:${f.lineNumber + 1})` : ''}`;
+  } else if (method === 'Runtime.exceptionThrown') line = `[exception] ${p.exceptionDetails.exception?.description || p.exceptionDetails.text}`;
+  else line = `[${p.entry.level}] ${p.entry.text}${p.entry.url ? ` (${p.entry.url})` : ''}`;
+  s.cons.push(line.slice(0, 500));
+  if (s.cons.length > 300) s.cons.shift();
+}
+// Header names whose values are credentials: never shown to the agent; replay still sends them.
+const SECRET = /^(cookie|authorization|proxy-authorization)$|token|secret|key|auth|session|csrf|xsrf|nonce|password/i;
+function bodyText(t, max) { try { return fmt(JSON.parse(t), max); } catch { return fmt(t, max); } }
+const kb = n => n < 1024 ? `${n}B` : `${(n / 1024).toFixed(1)}kB`;
+function netEntry(s, id) {
+  if (!s.net) throw new Error('Network recording is off for this tab. Start it with network {action:"start", reload:true}.');
+  const e = s.net.list.find(x => x.n === +id);
+  if (!e) throw new Error(`No request #${id}. Use network {action:"list"}.`);
+  return e;
+}
+async function postData(s, e) {
+  if (e.post != null || !e.hasPost) return e.post;
+  return (await cdp(s.tabId, 'Network.getRequestPostData', { requestId: e.rid }).catch(() => ({}))).postData;
+}
+
 // ---------- tools ----------
 const TOOLS = {
   reload() { setTimeout(() => chrome.runtime.reload(), 200); return 'Reloading extension'; }, // dev: pick up code changes
@@ -533,7 +594,7 @@ const TOOLS = {
     if (!steps.length) throw new Error('batch needs a non-empty steps array, e.g. [{"tool":"click","ref":"e5"}]');
     for (const [i, st] of steps.entries()) {
       const { tool, ...args } = st;
-      if (!TOOLS[tool] || tool === 'batch' || tool === 'reload') throw new Error(`Step ${i + 1}: unknown tool "${tool}"`);
+      if (!TOOLS[tool] || tool === 'batch' || tool === 'reload' || tool === 'probe') throw new Error(`Step ${i + 1}: unknown tool "${tool}"`);
       const last = i === steps.length - 1;
       try {
         const r = await TOOLS[tool]({ tab: a.tab, ...args, agent: a.agent, snapshot: last ? a.snapshot ?? args.snapshot : false });
@@ -750,6 +811,89 @@ const TOOLS = {
       await sleep(300);
     }
     throw new Error(`Timed out after ${a.timeout || 15000}ms waiting for ${a.url ? `url~"${a.url}" ` : ''}${a.text ? `text "${a.text}" ${want ? 'to appear' : 'to disappear'}` : ''}`);
+  },
+
+  async network(a) {
+    const s = await session(a), act = a.action || 'list';
+    if (act === 'start') {
+      if (!s.net) { s.net = { list: [], rid: new Map(), seq: 0 }; await cdp(s.tabId, 'Network.enable'); }
+      if (a.reload) { await chrome.tabs.reload(s.tabId); await loaded(s.tabId); }
+      return `Recording network on tab ${s.tabId}${a.reload ? ' (reloaded)' : ''}. List requests with network {}.`;
+    }
+    if (act === 'stop') {
+      s.net = null;
+      await cdp(s.tabId, 'Network.disable').catch(() => {});
+      return 'Stopped recording network.';
+    }
+    if (act === 'get') {
+      const e = netEntry(s, a.id);
+      let out = `#${e.n} ${e.method} ${e.url}\nRequest headers:\n` + Object.entries(e.headers || {})
+        .map(([k, v]) => `  ${k}: ${SECRET.test(k) ? `•••••••• (${String(v).length} chars, replay reuses it)` : v}`).join('\n');
+      const post = await postData(s, e);
+      if (post) out += `\nRequest body:\n${bodyText(post, a.max)}`;
+      out += `\nResponse: ${e.failed ? 'FAILED ' + e.failed : e.status ?? 'pending'} ${e.mime || ''}`;
+      if (e.done && !e.failed) {
+        try {
+          const r = await cdp(s.tabId, 'Network.getResponseBody', { requestId: e.rid });
+          const raw = r.base64Encoded ? Uint8Array.from(atob(r.body), c => c.charCodeAt(0)) : null;
+          out += '\n' + (raw && !/json|text|xml|javascript/.test(e.mime || '') ? `(binary, ${raw.length} bytes)` : bodyText(raw ? new TextDecoder().decode(raw) : r.body, a.max));
+        } catch (err) { out += `\n(body no longer available: ${err.message})`; }
+      }
+      return out;
+    }
+    if (act === 'replay') {
+      // Runs fetch inside the page, so it carries the user's cookies and the original (unshown) auth headers.
+      const e = netEntry(s, a.id), method = (a.method || e.method).toUpperCase(), url = a.url || e.url;
+      const headers = Object.fromEntries(Object.entries({ ...e.headers, ...a.headers }).filter(([k]) => !k.startsWith(':')));
+      const body = a.body === undefined ? await postData(s, e) : typeof a.body === 'string' ? a.body : JSON.stringify(a.body);
+      // A cross-origin response without allow-credentials means the page sent none (e.g. public APIs with ACAO "*"):
+      // including them would get the response blocked after the request already ran.
+      const credentials = e.acac === false && new URL(e.url).origin !== new URL((await chrome.tabs.get(s.tabId)).url).origin ? 'same-origin' : 'include';
+      const opts = { method, headers, credentials, ...(/^(GET|HEAD)$/.test(method) ? {} : { body }) };
+      const r = await evalIn(s, await topFrame(s), `(async (u, o) => { const r = await fetch(u, o); return { status: r.status, type: r.headers.get('content-type') || '', body: await r.text() }; })(${JSON.stringify(url)}, ${JSON.stringify(opts)})`);
+      return `Replayed ${method} ${url} -> ${r.status} ${r.type}\n` + bodyText(r.body, a.max);
+    }
+    if (act !== 'list') throw new Error(`Unknown action "${act}". Use start, list, get, replay or stop.`);
+    if (!s.net) throw new Error('Network recording is off for this tab. Start it with network {action:"start", reload:true}.');
+    let origin = '';
+    try { origin = new URL((await chrome.tabs.get(s.tabId)).url).origin; } catch {}
+    let lines = s.net.list.filter(e => a.all || e.type === 'XHR' || e.type === 'Fetch').map(e =>
+      `#${e.n} ${e.method} ${e.failed ? 'FAILED ' + e.failed : e.status ?? '…'} ${(e.url.startsWith(origin + '/') ? e.url.slice(origin.length) : e.url).slice(0, 200)}${e.mime ? ` (${e.mime}${e.size ? ', ' + kb(e.size) : ''})` : ''}`);
+    if (a.query) lines = matches(lines, a.query);
+    if (!lines.length) return `No ${a.all ? '' : 'XHR/fetch '}requests recorded${a.query ? ` matching "${a.query}"` : ''} yet.`;
+    return (lines.length > 60 ? `…${lines.length - 60} earlier (narrow with query)\n` : '') + lines.slice(-60).join('\n');
+  },
+
+  async console(a) {
+    const s = await session(a), act = a.action || 'read';
+    if (act === 'start') {
+      if (!s.cons) { s.cons = []; await cdp(s.tabId, 'Runtime.enable'); await cdp(s.tabId, 'Log.enable'); }
+      return `Capturing console on tab ${s.tabId}. To catch errors from page load, reload (navigate reload:true).`;
+    }
+    if (act === 'stop') {
+      s.cons = null;
+      await cdp(s.tabId, 'Runtime.disable').catch(() => {});
+      await cdp(s.tabId, 'Log.disable').catch(() => {});
+      return 'Stopped console capture.';
+    }
+    if (act !== 'read') throw new Error(`Unknown action "${act}". Use start, read or stop.`);
+    if (!s.cons) throw new Error('Console capture is off for this tab. Start it with console {action:"start"}.');
+    const lines = s.cons.splice(0);
+    return lines.length ? fmt(lines.join('\n'), a.max) : 'No new console messages.';
+  },
+
+  // Internal (daemon watchers): the text lines of a tab, without claiming it as anyone's target tab.
+  async probe(a) {
+    let s;
+    if (a.tab == null) s = await session(a);
+    else {
+      const t = await chrome.tabs.get(+a.tab).catch(() => null);
+      if (!t) throw new Error(`Tab ${a.tab} not found (closed).`);
+      s = await attach(t.id);
+    }
+    if (a.reload) { await chrome.tabs.reload(s.tabId); s = (await loaded(s.tabId)) || s; }
+    const { meta, lines } = await collect(s, { mode: 'text' });
+    return { tab: s.tabId, url: meta?.url || '', lines: a.query ? matches(lines, a.query) : lines };
   },
 };
 function jpegSize(b64) {

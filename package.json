@@ -1,7 +1,14 @@
 {
   "name": "reins",
   "version": "2.0.0",
-  "description": "Let a local AI agent drive your real Chrome and Edge, with your logged-in sessions.",
+  "description": "MCP server and browser extension that lets AI agents (Claude Code, Codex, Cursor, Gemini CLI) drive your real, logged-in Chrome or Edge.",
+  "keywords": [
+    "mcp", "mcp-server", "model-context-protocol", "browser-automation", "ai-agent", "claude-code", "codex", "cursor",
+    "gemini-cli", "chrome-extension", "chrome-devtools-protocol", "web-automation", "playwright-alternative", "llm", "agents"
+  ],
+  "homepage": "https://github.com/AnasNafees1802/reins#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/AnasNafees1802/reins.git" },
+  "bugs": { "url": "https://github.com/AnasNafees1802/reins/issues" },
   "bin": { "reins": "bin/reins.js" },
   "engines": { "node": ">=20" },
   "dependencies": { "ws": "^8.18.0" },

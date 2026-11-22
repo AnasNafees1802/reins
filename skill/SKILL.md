@@ -29,6 +29,13 @@ Cost is driven by the NUMBER OF TURNS (each turn re-reads the context), not by R
 - Batch typing: `type ref text submit:true` instead of type, then press Enter.
 - `snapshot:false` on actions whose result you do not need to see.
 
+## Site APIs, console, background watches
+
+- **Use the site's own API.** `network action:"start" reload:true`, then `network` lists the XHR/fetch calls. `network action:"get" id:7` shows one (credential headers are masked; you never see them). `network action:"replay" id:7 url:"...page=2"` (or `body`, `method`, `headers`) calls it again as the user. For bulk reads or repeated edits, one replay beats dozens of clicks. Same confirmation rules apply: a replayed POST is a real action.
+- **Debugging a web app:** `console action:"start"`, reload, then `console` returns new messages and exceptions. Action replies also flag unread console errors.
+- **Wait for something slow** (a deploy, a reply, a price): `watch action:"add" text:"Deploy finished"` (or `gone:true`, or `query:"status"` to report any change in matching lines; `reload:true` for pages that do not update live; `every` seconds, default 60). Then `watch action:"wait" timeout:0` blocks until it fires, costing no turns while it waits. `watch` (list) and `watch action:"remove" id:"w1"` manage them. Watches run in the daemon, so they keep going while you do other work.
+- `run` (a shell command on each event) is CLI only. If the user wants one, give them the `reins watch action=add ... run="..."` command to run themselves; the command reads the event from the file in `REINS_EVENT_FILE`.
+
 ## When something fails
 
 - `Cannot click: covered by <...>`: a modal, cookie banner or overlay is on top. Close it (look for its button in the snapshot) or `press key:"Escape"`. Use `force:true` only when the cover is harmless.
