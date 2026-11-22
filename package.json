@@ -6,6 +6,7 @@
     "mcp", "mcp-server", "model-context-protocol", "browser-automation", "ai-agent", "claude-code", "codex", "cursor",
     "gemini-cli", "chrome-extension", "chrome-devtools-protocol", "web-automation", "playwright-alternative", "llm", "agents"
   ],
+  "author": { "name": "Anas Nafees", "url": "https://www.anasnafees.com/" },
   "homepage": "https://github.com/AnasNafees1802/reins#readme",
   "repository": { "type": "git", "url": "git+https://github.com/AnasNafees1802/reins.git" },
   "bugs": { "url": "https://github.com/AnasNafees1802/reins/issues" },

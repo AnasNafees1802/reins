@@ -307,6 +307,12 @@ node test/bench.js            # hard-task benchmark: accuracy, turns, latency (B
 
 `test/e2e.js` covers network recording, masking and replay (same-site and cross-origin), console capture, watches (text, query, run, per-agent isolation), tab ownership across an extension reload, field naming and link URL opt-in. Both scripts start their own fixture server, so stop any `test/fixture.js` you left running first, or it will serve stale pages on ports 8701 and 8702. After editing `extension/`, run `reins install extension=false`: it copies the extension to `~/.reins/extension` and reloads it in every connected browser.
 
+## Author
+
+Built by Anas Nafees. Website: [anasnafees.com](https://www.anasnafees.com/) · LinkedIn: [linkedin.com/in/anas-nafees](https://www.linkedin.com/in/anas-nafees)
+
+Bug reports and ideas are welcome in [GitHub issues](https://github.com/AnasNafees1802/reins/issues).
+
 ## License
 
 [MIT](LICENSE)
