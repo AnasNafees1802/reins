@@ -49,4 +49,4 @@ Cost is driven by the NUMBER OF TURNS (each turn re-reads the context), not by R
 - JS dialogs (alert/confirm) are auto-accepted and reported in the reply.
 - Links that open a new tab switch the agent's target to it automatically; the reply says so.
 - Several browsers connected: pass `browser:"edge"` or `browser:"chrome"`.
-- Other agents may share this browser. On long runs, pass `tab:<id>` on every call so another agent switching tabs cannot redirect you.
+- Other agents may share this browser. Each agent session gets its own target tab automatically. Never act in a tab that `tabs` marks "other agent". If you are told the tab is in use, open your own with `navigate {url, newTab:true}`. CLI users running several agents: give each its own `REINS_AGENT=<name>` env var.

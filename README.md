@@ -1,6 +1,6 @@
 # Reins
 
-Hand your AI agent the reins of the browser you already use. Reins lets Claude Code, Codex, OpenCode, Antigravity, Gemini CLI and Cursor drive your open Chrome, Edge, Brave or Opera, logged in as you. No separate automation browser, no new profile, no re-logins.
+Hand your AI agent the reins of the browser you already use. Reins lets Claude Code, Codex, OpenCode, Antigravity, Gemini CLI and Cursor drive your open Chrome, Edge, Brave or Opera, logged in as you. No separate automation browser, no new profile, no re-logins. Run several agents at once: each one works in its own tab.
 
 ## Install (one line)
 
@@ -96,6 +96,7 @@ agent ──MCP/CLI──> reins daemon (127.0.0.1:17333) <──WebSocket──
 - Pages are read as a compact outline with stable refs (`e12`, `f1e5` inside iframes), including shadow DOM and cross-site iframes.
 - After each action the agent gets only what changed on the page, so it rarely needs a second read.
 - `batch` runs a whole form plus Save in one call. Fewer turns is the biggest cost saver.
+- Parallel agents: every agent session (two Claude Code windows, Codex plus Cursor, ...) gets its own tab. Agents never take over a tab another agent is using, so they can work side by side in one browser.
 
 The toolbar badge shows **ON** when connected. Click the icon to pause or resume agent control.
 
@@ -111,7 +112,7 @@ reins status                  # which browsers are connected
 reins reload-extension        # after editing extension/ (run reins install to copy it first)
 ```
 
-Several agents can share one browser. On long runs, pass `tab=<id>` on every call so agents do not steal each other's tab.
+Several agents (or several sessions of the same agent) can work in one browser in parallel. Each agent session gets its own target tab, and no agent will take over a tab another agent is using. Over the CLI, give each parallel agent its own `REINS_AGENT=<name>` env var.
 
 ## Cost
 

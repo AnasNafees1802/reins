@@ -1,7 +1,9 @@
 // Reins extension: connects to the local Reins daemon and executes agent tool calls via CDP.
 const PORT = 17333; // ponytail: fixed port, must match bin/reins.js
 const T = new Map(); // tabId -> tab state
-let ws = null, paused = false, current = null, watching = null, opened = [];
+let ws = null, paused = false;
+const cur = new Map(); // agent id -> that agent's target tab, so parallel agents never share or steal a tab
+const owner = (tabId, me) => [...cur].find(([k, v]) => v === tabId && k !== me)?.[0];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cdp = (tabId, method, params = {}, sessionId) =>
   chrome.debugger.sendCommand(sessionId ? { tabId, sessionId } : { tabId }, method, params);
@@ -26,7 +28,7 @@ async function onMsg(m) {
     if (paused) throw new Error('The user paused agent control in this browser (Reins toolbar icon). Ask them to resume.');
     const fn = TOOLS[m.tool];
     if (!fn) throw new Error(`Unknown tool "${m.tool}"`);
-    send({ id: m.id, result: await fn(m.args || {}) });
+    send({ id: m.id, result: await fn({ ...(m.args || {}), agent: m.agent || 'default' }) });
   } catch (e) {
     send({ id: m.id, error: String(e?.message || e) });
   }
@@ -48,8 +50,8 @@ chrome.storage.session.get('paused').then(v => { paused = !!v.paused; badge(); }
 connect();
 
 // ---------- tab + debugger state ----------
-chrome.tabs.onRemoved.addListener(id => { T.delete(id); if (current === id) current = null; });
-chrome.tabs.onCreated.addListener(t => { if (watching != null && t.openerTabId === watching) opened.push(t.id); });
+chrome.tabs.onRemoved.addListener(id => { T.delete(id); for (const [k, v] of cur) if (v === id) cur.delete(k); });
+chrome.tabs.onCreated.addListener(t => { const s = T.get(t.openerTabId); if (s?.watching) s.opened.push(t.id); });
 chrome.debugger.onDetach.addListener((src, reason) => {
   T.delete(src.tabId);
   if (reason === 'canceled_by_user') setPaused(true); // user hit "Cancel" on the debugging bar: respect it
@@ -69,18 +71,20 @@ chrome.debugger.onEvent.addListener((src, method, p) => {
 });
 
 async function tabFor(a) {
-  const id = a.tab ?? current;
+  const id = a.tab ?? cur.get(a.agent);
   if (id != null) {
-    try { const t = await chrome.tabs.get(+id); current = t.id; return t; }
-    catch { if (a.tab != null) throw new Error(`Tab ${a.tab} not found. Use tabs {action:"list"}.`); }
+    try { const t = await chrome.tabs.get(+id); cur.set(a.agent, t.id); return t; }
+    catch { if (a.tab != null) throw new Error(`Tab ${a.tab} not found. Use tabs {action:"list"}.`); cur.delete(a.agent); }
   }
+  // No tab yet: take the active tab, unless another agent is working in it.
   let [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!/^(https?|file):/.test(t?.url || '')) { // active tab is a browser page: use the most recently used web tab
-    const web = (await chrome.tabs.query({})).filter(x => /^(https?|file):/.test(x.url || ''));
+  if (!/^(https?|file):/.test(t?.url || '')) { // active tab is a browser page: use the most recently used free web tab
+    const web = (await chrome.tabs.query({})).filter(x => /^(https?|file):/.test(x.url || '') && !owner(x.id, a.agent));
     t = web.sort((x, y) => (y.lastAccessed || 0) - (x.lastAccessed || 0))[0] || t;
   }
   if (!t) throw new Error('No open tab. Use navigate with newTab:true.');
-  current = t.id;
+  if (owner(t.id, a.agent)) throw new Error(`Tab ${t.id} is in use by another agent. Open your own with navigate {url, newTab:true}, or pass tab:<id> of a free tab.`);
+  cur.set(a.agent, t.id);
   return t;
 }
 async function attach(tabId) {
@@ -91,7 +95,7 @@ async function attach(tabId) {
     if (!/already attached/i.test(e.message))
       throw new Error(`Cannot control this tab (${e.message}). Browser pages like chrome://, edge:// and extension stores are off-limits; navigate to a normal site.`);
   }
-  s = { tabId, kids: new Map(), ctx: new Map(), fid: new Map(), fbyn: new Map(), dialogs: [], last: null, lastOpts: null, shotScale: 1 };
+  s = { tabId, kids: new Map(), ctx: new Map(), fid: new Map(), fbyn: new Map(), dialogs: [], watching: false, opened: [], last: null, lastOpts: null, shotScale: 1 };
   T.set(tabId, s);
   await setup(s);
   await cdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
@@ -360,11 +364,11 @@ async function snapshot(a, s) {
 
 // After an action: report status plus what changed on the page (cheap feedback, saves a snapshot call).
 async function report(s, a, note = '') {
-  watching = null;
-  if (opened.length) {
-    const id = opened.pop();
-    opened = [];
-    current = id;
+  s.watching = false;
+  if (s.opened.length) {
+    const id = s.opened.pop();
+    s.opened = [];
+    cur.set(a.agent, id);
     await group(id);
     await loaded(id);
     return `${note}Opened new tab ${id}; it is now the target tab.\n` + (a.snapshot === false ? '' : await snapshot({ max: a.max }, await attach(id)));
@@ -532,13 +536,13 @@ const TOOLS = {
       if (!TOOLS[tool] || tool === 'batch' || tool === 'reload') throw new Error(`Step ${i + 1}: unknown tool "${tool}"`);
       const last = i === steps.length - 1;
       try {
-        const r = await TOOLS[tool]({ tab: a.tab, ...args, snapshot: last ? a.snapshot ?? args.snapshot : false });
+        const r = await TOOLS[tool]({ tab: a.tab, ...args, agent: a.agent, snapshot: last ? a.snapshot ?? args.snapshot : false });
         const text = typeof r === 'string' ? r : r.text;
         if (last) return typeof r === 'string' ? [...notes, r].join('\n') : { ...r, text: [...notes, r.text].join('\n') };
         if (text !== 'ok') notes.push(`${i + 1}. ${tool}: ${text.split('\n').slice(0, 3).join(' | ')}`);
       } catch (e) {
-        const s = await session({ tab: a.tab }).catch(() => null);
-        return [...notes, `Step ${i + 1} (${tool}) failed: ${e.message}. Steps before it succeeded.`, s ? await report(s, {}) : ''].join('\n');
+        const s = await session({ tab: a.tab, agent: a.agent }).catch(() => null);
+        return [...notes, `Step ${i + 1} (${tool}) failed: ${e.message}. Steps before it succeeded.`, s ? await report(s, { agent: a.agent }) : ''].join('\n');
       }
     }
     return 'ok';
@@ -548,7 +552,7 @@ const TOOLS = {
     const act = a.action || 'list';
     if (act === 'new') {
       const t = await chrome.tabs.create({ url: a.url ? normUrl(a.url) : 'about:blank', active: a.background !== true });
-      current = t.id;
+      cur.set(a.agent, t.id);
       await group(t.id);
       if (!a.url) return `Opened tab ${t.id}`;
       const s = await loaded(t.id);
@@ -557,17 +561,16 @@ const TOOLS = {
     if (act === 'switch') {
       const t = await chrome.tabs.update(+a.tab, { active: true });
       await chrome.windows.update(t.windowId, { focused: true });
-      current = t.id;
+      cur.set(a.agent, t.id);
       return `Target tab is now ${t.id}: ${t.title} | ${t.url}`;
     }
     if (act === 'close') {
-      const id = +(a.tab ?? current);
-      await chrome.tabs.remove(id);
-      if (current === id) current = null;
+      const id = +(a.tab ?? cur.get(a.agent));
+      await chrome.tabs.remove(id); // onRemoved clears every agent's claim on it
       return `Closed tab ${id}`;
     }
-    const all = await chrome.tabs.query({});
-    return all.map(t => `${t.id === current ? '*' : ' '}${t.id}${t.active ? ' (active)' : ''} ${(t.title || '').slice(0, 60)} | ${(t.url || '').slice(0, 100)}`).join('\n') + '\n(* = agent target tab)';
+    const all = await chrome.tabs.query({}), mine = cur.get(a.agent);
+    return all.map(t => `${t.id === mine ? '*' : ' '}${t.id}${t.active ? ' (active)' : ''}${owner(t.id, a.agent) ? ' (other agent)' : ''} ${(t.title || '').slice(0, 60)} | ${(t.url || '').slice(0, 100)}`).join('\n') + '\n(* = your target tab; leave "other agent" tabs alone)';
   },
 
   async navigate(a) {
@@ -577,7 +580,7 @@ const TOOLS = {
       tab = (await chrome.windows.getAll()).length
         ? await chrome.tabs.create({ url: normUrl(a.url), active: true })
         : (await chrome.windows.create({ url: normUrl(a.url), focused: true })).tabs[0]; // browser running with no window
-      current = tab.id;
+      cur.set(a.agent, tab.id);
       await group(tab.id);
     } else if (a.back) await chrome.tabs.goBack(tab.id);
     else if (a.forward) await chrome.tabs.goForward(tab.id);
@@ -594,7 +597,7 @@ const TOOLS = {
 
   async click(a) {
     const s = await session(a);
-    watching = s.tabId;
+    s.watching = true;
     if (a.ref) {
       const h = await handle(a);
       const p = await point(h, a.force);
@@ -617,7 +620,7 @@ const TOOLS = {
   async type(a) {
     if (a.text != null) a.text = String(a.text); // CLI/JSON may hand us numbers
     const h = await handle(a), s = h.s;
-    watching = s.tabId;
+    s.watching = true;
     const FOCUSED = 'function(){ this.focus(); let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a === this || this.contains(a); }';
     if (!(await call(h, FOCUSED))) { const p = await point(h, a.force); await mouse(s, p.x, p.y); }
     if (a.clear !== false) {
@@ -638,7 +641,7 @@ const TOOLS = {
 
   async press(a) {
     const s = await session(a);
-    watching = s.tabId;
+    s.watching = true;
     if (a.ref) await call(await handle(a), 'function(){ this.focus(); }');
     for (const k of [].concat(a.keys || a.key)) await press(s, k);
     await settle(s);
@@ -685,6 +688,7 @@ const TOOLS = {
 
   async upload(a) {
     const h = await handle(a), s = h.s;
+    if (!a.paths) throw new Error('upload needs paths (absolute file paths).');
     const files = [].concat(a.paths);
     if (await call(h, "function(){ return this.localName === 'input' && this.type === 'file'; }")) {
       await cdp(s.tabId, 'DOM.setFileInputFiles', { files, objectId: h.objectId }, h.sid);

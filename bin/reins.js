@@ -5,6 +5,9 @@ const PORT = 17333; // ponytail: fixed port, must match extension/background.js
 const EXT_ID = 'ggjpcidlnhbhdjajedgegjcnpnialhco'; // pinned by the "key" in extension/manifest.json
 const DIR = path.join(os.homedir(), '.reins');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Who is calling. Each MCP server process is one agent session, so it gets its own id (and its own tab).
+// CLI calls share "cli" unless REINS_AGENT is set.
+let AGENT = process.env.REINS_AGENT || 'cli';
 
 function token() {
   fs.mkdirSync(DIR, { recursive: true });
@@ -17,10 +20,11 @@ function token() {
 function serve() {
   const { WebSocketServer } = require('ws');
   const TOKEN = token(), browsers = [], old = new Set();
-  let last = null, seq = 0;
-  const pick = name => name
+  const last = new Map(); // agent -> browser it last used
+  let seq = 0;
+  const pick = (name, agent) => name
     ? browsers.find(b => b.name === name) || browsers.find(b => b.name.startsWith(name))
-    : browsers.includes(last) ? last : browsers[0];
+    : browsers.includes(last.get(agent)) ? last.get(agent) : browsers[0];
 
   const server = http.createServer(async (req, res) => {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
@@ -32,16 +36,16 @@ function serve() {
     for await (const c of req) body += c;
     let msg;
     try { msg = JSON.parse(body); } catch { return reply(400, { error: 'bad json' }); }
-    const b = pick(msg.browser);
+    const b = pick(msg.browser, msg.agent);
     if (!b) return reply(200, { error: browsers.length
       ? `No browser "${msg.browser}". Connected: ${browsers.map(x => x.name).join(', ')}`
       : 'No browser connected. Open Chrome or Edge with the Reins extension installed (toolbar badge shows ON).' });
-    last = b;
+    last.set(msg.agent, b);
     const id = ++seq, ms = (msg.args?.timeout || 0) + 60000;
     reply(200, await new Promise(resolve => {
       const t = setTimeout(() => { b.pending.delete(id); resolve({ error: `Timed out after ${ms / 1000}s` }); }, ms);
       b.pending.set(id, m => { clearTimeout(t); resolve(m); });
-      b.ws.send(JSON.stringify({ id, tool: msg.tool, args: msg.args || {} }));
+      b.ws.send(JSON.stringify({ id, tool: msg.tool, args: msg.args || {}, agent: msg.agent }));
     }));
   });
 
@@ -102,7 +106,7 @@ async function callTool(tool, args) {
   // A sleeping extension reconnects on its 30s alarm; wait for it instead of failing the first call.
   for (let i = 0; !st.browsers.length && i < 70; i++) { await sleep(500); st = await request('/status'); }
   const t0 = Date.now();
-  const r = await request('/call', { tool, args: rest, browser });
+  const r = await request('/call', { tool, args: rest, browser, agent: AGENT });
   const out = r.error ? { text: 'Error: ' + r.error } : typeof r.result === 'string' ? { text: r.result } : r.result;
   if (process.env.REINS_METER) // per-call usage log for cost tracking of long-running agents
     fs.appendFileSync(process.env.REINS_METER, JSON.stringify({ ts: t0, ms: Date.now() - t0, tool, args: rest, text: out.text, image: !!out.image, imageBytes: out.image?.length }) + '\n');
@@ -112,13 +116,13 @@ async function callTool(tool, args) {
 
 // ---------- tool schemas ----------
 const ref = { type: 'string', description: 'Element ref from the latest snapshot, e.g. e12 or f1e5' };
-const tab = { type: 'number', description: 'Tab id. Default: the agent target tab' };
+const tab = { type: 'number', description: 'Tab id. Default: your own target tab (each agent session gets its own)' };
 const browser = { type: 'string', description: 'chrome, edge, ... (only when several browsers are connected)' };
 const after = { type: 'boolean', description: 'Default returns a diff of what changed. true = full snapshot, false = nothing' };
 const tool = (name, description, properties, required = []) =>
   ({ name, description, inputSchema: { type: 'object', properties: { ...properties, tab, browser }, required } });
 const TOOLS = [
-  tool('tabs', 'List, open, switch to (focus) or close tabs. The * tab in the list is the agent target.', {
+  tool('tabs', 'List, open, switch to (focus) or close tabs. The * tab is yours; tabs marked "other agent" belong to parallel agents, leave them alone.', {
     action: { type: 'string', enum: ['list', 'new', 'switch', 'close'] }, url: { type: 'string' }, background: { type: 'boolean' } }),
   tool('navigate', 'Load a URL (or back/forward/reload) in the target tab and return a snapshot.', {
     url: { type: 'string' }, newTab: { type: 'boolean' }, back: { type: 'boolean' }, forward: { type: 'boolean' }, reload: { type: 'boolean' },
@@ -153,6 +157,7 @@ const TOOLS = [
 
 // ---------- MCP stdio server ----------
 function mcp() {
+  AGENT = process.env.REINS_AGENT || `mcp-${process.pid}`;
   const out = m => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\n');
   require('readline').createInterface({ input: process.stdin }).on('line', async line => {
     let m;
