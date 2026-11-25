@@ -36,7 +36,10 @@ async function onMsg(m) {
     const fn = TOOLS[m.tool];
     if (!fn) throw new Error(`Unknown tool "${m.tool}"`);
     await curReady;
-    send({ id: m.id, result: await fn({ ...(m.args || {}), agent: m.agent || 'default' }) });
+    const agent = m.agent || 'default', result = await fn(await locate({ ...(m.args || {}), agent }));
+    // The agent's tab URL rides along, so the daemon can show what it remembers about that site.
+    const tid = agent === 'watch' ? null : cur.get(agent);
+    send({ id: m.id, result, url: tid == null ? undefined : (await chrome.tabs.get(tid).catch(() => null))?.url });
   } catch (e) {
     send({ id: m.id, error: String(e?.message || e) });
   }
@@ -469,6 +472,52 @@ function refKeys(lines) {
   return m;
 }
 
+// ---------- locators: find an element by role and name, so saved recipes work in a later session ----------
+// find: {role?, name?, nth?} or a plain name. An exact name (ignoring case) beats a partial one; several matches
+// without nth is an error, so a recipe never clicks the wrong "Save".
+function pickRef(lines, find) {
+  const f = typeof find === 'string' ? { name: find } : find || {};
+  if (!f.name && !f.role) throw new Error('find needs a name and/or a role, e.g. {role:"button", name:"Save"}.');
+  const norm = v => String(v ?? '').replace(/"/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+  const want = norm(f.name), role = f.role && String(f.role).toLowerCase();
+  const all = [...refKeys(lines)].map(([ref, k]) => { const m = /^(\w+) "(.*)"$/.exec(k); return { ref, role: m[1], name: m[2] }; })
+    .filter(x => !role || x.role === role);
+  const exact = all.filter(x => norm(x.name) === want);
+  // Snapshot names are cut at 80 chars and end in "…": a longer wanted name still matches its start.
+  const part = want ? all.filter(x => { const n = norm(x.name); return n.includes(want) || (n.endsWith('…') && want.startsWith(n.slice(0, -1))); }) : all;
+  const hits = exact.length ? exact : part;
+  const what = `${role || 'element'}${f.name ? ` "${f.name}"` : ''}`;
+  if (!hits.length) return null;
+  if (f.nth) { if (!hits[f.nth - 1]) throw new Error(`Only ${hits.length} ${what} on the page, no nth:${f.nth}.`); return hits[f.nth - 1].ref; }
+  if (hits.length > 1) throw new Error(`${hits.length} matches for ${what}: ${hits.slice(0, 5).map(x => `${x.role} "${x.name}"`).join(', ')}. Add nth, a role or a longer name.`);
+  return hits[0].ref;
+}
+// role+name (and nth when the same pair appears twice) for refs in the latest snapshot: the inverse of pickRef.
+function locatorOf(lines, ref) {
+  const keys = refKeys(lines), k = keys.get(ref);
+  if (!k) return null;
+  const [, role, name] = /^(\w+) "(.*)"$/.exec(k);
+  const same = [...keys].filter(([, v]) => v === k).map(([r]) => r);
+  return { role, name, ...(same.length > 1 ? { nth: same.indexOf(ref) + 1 } : {}) };
+}
+// Turn a.find into a.ref before a tool runs. Waits up to 3s for the element, since a recipe step often targets
+// something the previous step is still rendering.
+async function locate(a) {
+  if (a.find == null || a.ref) return a;
+  const s = await session(a), end = Date.now() + 3000;
+  for (;;) {
+    const { meta, lines } = await collect(s, { mode: 'full' });
+    if (!s.last) { s.last = lines; s.lastOpts = { mode: 'full', viewport: false, hrefs: false }; s.lastUrl = meta?.url; } // baseline for the reply's diff
+    const ref = pickRef(lines, a.find);
+    if (ref) return { ...a, ref };
+    if (Date.now() > end) {
+      const f = typeof a.find === 'string' ? { name: a.find } : a.find;
+      throw new Error(`No ${f.role || 'element'}${f.name ? ` named "${f.name}"` : ''} on the page. Take a snapshot to see what is there.`);
+    }
+    await sleep(300);
+  }
+}
+
 // ---------- element handles + input ----------
 async function resolve(s, ref) {
   const m = /^(?:f(\d+))?e(\d+)$/.exec(ref);
@@ -481,7 +530,7 @@ async function resolve(s, ref) {
 }
 async function handle(a) {
   const s = await session(a), ref = String(a.ref || '');
-  if (!/^(?:f\d+)?e\d+$/.test(ref)) throw new Error(`Bad ref "${a.ref}". Use a ref like e12 from the latest snapshot.`);
+  if (!/^(?:f\d+)?e\d+$/.test(ref)) throw new Error(a.ref == null ? 'Give ref (like e12 from the latest snapshot) or find:{role, name}.' : `Bad ref "${a.ref}". Use a ref like e12 from the latest snapshot.`);
   const h = await resolve(s, ref);
   if (h) return h;
   // The page re-rendered (common in React/Vue): find the same control again by role and name, if exactly one matches
@@ -679,10 +728,10 @@ const TOOLS = {
     if (!steps.length) throw new Error('batch needs a non-empty steps array, e.g. [{"tool":"click","ref":"e5"}]');
     for (const [i, st] of steps.entries()) {
       const { tool, ...args } = st;
-      if (!TOOLS[tool] || tool === 'batch' || tool === 'reload' || tool === 'probe') throw new Error(`Step ${i + 1}: unknown tool "${tool}"`);
+      if (!TOOLS[tool] || /^(batch|reload|probe|locators)$/.test(tool)) throw new Error(`Step ${i + 1}: unknown tool "${tool}"`);
       const last = i === steps.length - 1;
       try {
-        const r = await TOOLS[tool]({ tab: a.tab, ...args, agent: a.agent, snapshot: last ? a.snapshot ?? args.snapshot : false });
+        const r = await TOOLS[tool](await locate({ tab: a.tab, ...args, agent: a.agent, snapshot: last ? a.snapshot ?? args.snapshot : false }));
         const text = typeof r === 'string' ? r : r.text;
         if (last) return typeof r === 'string' ? [...notes, r].join('\n') : { ...r, text: [...notes, r.text].join('\n') };
         if (text !== 'ok') notes.push(`${i + 1}. ${tool}: ${text.split('\n').slice(0, 3).join(' | ')}`);
@@ -964,6 +1013,12 @@ const TOOLS = {
     if (!s.cons) throw new Error('Console capture is off for this tab. Start it with console {action:"start"}.');
     const lines = s.cons.splice(0);
     return lines.length ? fmt(lines.join('\n'), a.max) : 'No new console messages.';
+  },
+
+  // Internal (recipe save): role+name locators for refs in this agent's latest snapshot.
+  async locators(a) {
+    const s = await session(a);
+    return Object.fromEntries([].concat(a.refs || []).map(r => [r, locatorOf(s.last || [], r)]).filter(([, v]) => v));
   },
 
   // Internal (daemon watchers): the text lines of a tab, without claiming it as anyone's target tab.

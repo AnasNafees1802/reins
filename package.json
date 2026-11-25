@@ -11,6 +11,7 @@
   "repository": { "type": "git", "url": "git+https://github.com/AnasNafees1802/reins.git" },
   "bugs": { "url": "https://github.com/AnasNafees1802/reins/issues" },
   "bin": { "reins": "bin/reins.js" },
+  "scripts": { "test": "node --test test/memory.test.js test/extension.test.js test/daemon.test.js" },
   "engines": { "node": ">=20" },
   "dependencies": { "ws": "^8.18.0" },
   "files": ["bin", "extension", "skill"],

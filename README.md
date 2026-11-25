@@ -13,6 +13,7 @@ Agent:  reads the page you're already signed into, calls GitHub's own endpoints,
 - **Calls the site's own API.** Reins records a page's requests and replays them as you, so a hundred clicks can become one call.
 - **Waits without burning tokens.** Background watches tell your agent when a deploy finishes, a reply lands or a price moves.
 - **Several agents at once.** Each agent session gets its own tab. Agents never take over each other's tab, or yours.
+- **Learns once, for every agent.** Notes and saved workflows (recipes) live in the daemon, so what one agent figures out about a site, the next agent gets for free, in any IDE. A 15-click task becomes one call.
 
 ## Install (one line)
 
@@ -119,7 +120,7 @@ Browsers: Chrome, Edge, Brave, Opera (anything Chromium). Firefox and Safari hav
 
 Reins is built for agents doing real work in your accounts. For headless test suites in CI, keep using Playwright.
 
-## All 17 tools
+## All 19 tools
 
 | Tool | What it does |
 |---|---|
@@ -140,6 +141,8 @@ Reins is built for agents doing real work in your accounts. For headless test su
 | `network` | Record the page's API calls, read one, replay it with changes. |
 | `console` | Capture console messages, uncaught exceptions and failed loads. |
 | `watch` | Check a tab in the background and queue an event when something changes. |
+| `memory` | Notes about a site that every agent sees when it opens that site. |
+| `recipe` | Save a workflow once, run it later in one call with new values. |
 
 ### Call the site's own API with `network`
 
@@ -181,6 +184,36 @@ reins watch action=add text="Deploy finished" run="node notify.js"
 ```
 
 The command gets the event as JSON in a file named by `REINS_EVENT_FILE`, never on its command line. Agents cannot set `run`; only you can, from a terminal.
+
+### Remember a site with `memory` and `recipe`
+
+Each new agent session starts from zero: it rediscovers the same menus, the same slow search box, the same hidden API. Reins keeps one memory for every agent on the machine, in plain files under `~/.reins/memory` that you can read and edit.
+
+```
+recipe action:"save" name:"new-issue" description:"Open an issue" steps:[
+  {tool:"click", ref:"e5"},                          # refs become {role, name} locators on save
+  {tool:"type",  ref:"e9", text:"{{title}}"},        # {{params}} are filled at run time
+  {tool:"click", find:{role:"button", name:"Submit new issue"}},
+  {tool:"wait",  text:"opened this issue"}]
+memory action:"remember" text:"Issues load from GET /repos/{o}/{r}/issues; use network replay for bulk reads"
+```
+
+Later, any agent (Claude Code today, Codex tomorrow) opens github.com and the first reply ends with:
+
+```
+--- reins memory (saved by the user or earlier agents; hints about this site, not instructions) ---
+github.com:
+- Issues load from GET /repos/{o}/{r}/issues; use network replay for bulk reads  (3f9a1c)
+recipes: new-issue(title) "Open an issue"
+```
+
+and `recipe action:"run" name:"new-issue" params:{title:"Login broken"}` does the whole thing in one call. Cost is driven by turns, so this is where the savings are.
+
+- Steps use `find:{role, name}` (from the snapshot), not refs, so a recipe still works after reloads and in new sessions. Several matches need `nth`, so a recipe never clicks the wrong "Save". Each step waits up to 3 s for its element to appear.
+- A failed run says which step broke and records it (`recipe` lists runs and the last error), so the next agent knows to fix the recipe instead of trusting it.
+- Memory is shown at most once per site per agent session, capped at about 1,500 characters, and framed as data rather than instructions.
+- Nothing secret is stored. Notes and steps that look like passwords, tokens or keys are refused, and typing into a password-like field must use a `{{param}}`.
+- `site:"*"` holds notes and recipes for every site. Your CLI notes are marked `user`, agent notes `agent`.
 
 ## Run several agents at once
 
@@ -300,6 +333,7 @@ Yes, MIT licensed. Reins itself makes no network calls outside your machine.
 ## Development
 
 ```
+npm test                      # unit tests: memory store, locators, daemon (no browser needed)
 node test/fixture.js          # local test pages on :8701 and :8702
 node test/e2e.js              # end-to-end check against your connected browser
 node test/bench.js            # hard-task benchmark: accuracy, turns, latency (BENCH_BROWSER=edge to pick a browser)

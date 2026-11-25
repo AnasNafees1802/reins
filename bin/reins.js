@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Reins: local daemon (bridges agents <-> browser extension), MCP stdio server, and CLI.
 const http = require('http'), fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
-const PORT = 17333; // ponytail: fixed port, must match extension/background.js
+const PORT = +process.env.REINS_PORT || 17333; // ponytail: fixed port, must match extension/background.js (REINS_PORT is for tests)
 const EXT_ID = 'ggjpcidlnhbhdjajedgegjcnpnialhco'; // pinned by the "key" in extension/manifest.json
 const DIR = path.join(os.homedir(), '.reins');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -10,6 +10,8 @@ const RELATIVE_TIME = /\b(\d+|an?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|
 // Who is calling. Each MCP server process is one agent session, so it gets its own id (and its own tab).
 // CLI calls share "cli" unless REINS_AGENT is set.
 let AGENT = process.env.REINS_AGENT || 'cli';
+// Who wrote a memory: the user at a terminal, or an agent over MCP. Shown next to every note and recipe.
+let SOURCE = 'user';
 
 function token() {
   fs.mkdirSync(DIR, { recursive: true });
@@ -132,6 +134,98 @@ function serve() {
     return { result: (lines.join('\n') || 'No watches.') + (n ? `\n${n} event(s) waiting: watch {action:"wait"}` : '') };
   }
 
+  // ---------- memory: site notes and recipes every agent shares (bin/memory.js holds the store) ----------
+  const { createStore, siteOf, fill } = require('./memory');
+  const mem = createStore(path.join(DIR, 'memory'));
+  const where = new Map(), hinted = new Map(); // agent -> URL of its target tab, agent -> site it was last shown memory for
+  const here = (a, agent) => {
+    if (a.site) return siteOf(a.site);
+    if (!where.has(agent)) throw new Error('No current page yet. Pass site:"example.com", or open the site first.');
+    return siteOf(where.get(agent));
+  };
+  // The extension reports the agent's tab URL with each reply. The first reply on a site with memory carries it,
+  // so an agent learns what earlier agents found without asking (and without spending a turn).
+  function withHint(agent, r, tool) {
+    if (!r.url) return r;
+    where.set(agent, r.url);
+    let site;
+    try { site = siteOf(r.url); } catch { return r; } // chrome://, file:, about:blank
+    if (r.error || tool === 'eval' || hinted.get(agent) === site) return r; // eval output is data the agent parses: keep it clean
+    const first = !hinted.has(agent);
+    hinted.set(agent, site);
+    const h = mem.hint(site, { all: first });
+    if (!h) return r;
+    if (typeof r.result === 'string') r.result += '\n\n' + h;
+    else if (r.result && typeof r.result.text === 'string') r.result.text += '\n\n' + h;
+    return r;
+  }
+  function memory(msg) {
+    const a = msg.args || {}, act = a.action || 'recall';
+    if (act === 'remember') {
+      const site = here(a, msg.agent), { note, added } = mem.remember(site, a.text, msg.source);
+      return `${added ? 'Remembered' : 'Already remembered'} for ${site === '*' ? 'every site' : site} (id ${note.id}). Every agent sees it when it opens ${site === '*' ? 'any site' : site}.`;
+    }
+    if (act === 'forget') return `Forgot ${mem.forget(a.id || a.text, a.site && siteOf(a.site))} note(s).`;
+    if (act === 'list' || (act === 'recall' && !a.site && !where.has(msg.agent))) {
+      const sites = mem.sites();
+      return sites.length ? sites.map(s => `${s}: ${mem.notes(s).length} note(s), ${mem.recipes(s).length} recipe(s)`).join('\n') + '\nRead one with memory {site:"…"}.'
+        : 'No memory yet. Save facts with memory {action:"remember", text} and workflows with recipe {action:"save"}.';
+    }
+    if (act !== 'recall') throw new Error(`Unknown action "${act}". Use recall, remember, forget or list.`);
+    const site = here(a, msg.agent);
+    return mem.hint(site, { all: true }) || `No notes or recipes for ${site} yet.`;
+  }
+  async function recipe(msg) {
+    const a = msg.args || {}, act = a.action || 'list';
+    if (act === 'list') {
+      const sites = a.site ? [siteOf(a.site)] : mem.sites();
+      const lines = sites.flatMap(s => mem.recipes(s).map(r => `${s} ${r.name}${r.params.length ? `(${r.params.join(', ')})` : ''}: ${r.description || `${r.steps.length} steps`} | ${r.runs} runs${r.lastError ? `, last run failed: ${r.lastError}` : ''}`));
+      return lines.join('\n') || 'No recipes yet. After a multi-step task that will come up again, save it with recipe {action:"save", name, steps}.';
+    }
+    if (act === 'get') {
+      const r = mem.findRecipe(a.name, a.site ? siteOf(a.site) : where.has(msg.agent) ? siteOf(where.get(msg.agent)) : null);
+      return JSON.stringify(r, null, 1);
+    }
+    if (act === 'delete') return mem.deleteRecipe(here(a, msg.agent), a.name) ? `Deleted recipe "${a.name}".` : `No recipe "${a.name}" there.`;
+    const b = pick(msg.browser, msg.agent);
+    if (act === 'save') {
+      const site = here(a, msg.agent);
+      let steps = a.steps;
+      // Refs only last for one page load: swap them for role+name locators read from the agent's latest snapshot.
+      const refs = Array.isArray(steps) ? steps.map(s => s?.ref).filter(Boolean) : [];
+      if (refs.length) {
+        if (!b) throw new Error(noBrowser(msg.browser));
+        const r = await ask(b, 'locators', { refs }, msg.agent);
+        if (r.error) throw new Error(r.error);
+        const miss = refs.filter(x => !r.result[x]);
+        if (miss.length) throw new Error(`${miss.join(', ')} not in your latest snapshot. Take a snapshot, or write find:{role, name} yourself.`);
+        steps = steps.map(({ ref, tab, ...s }) => ref ? { ...s, find: r.result[ref] } : s);
+      }
+      const { recipe: r, replaced } = mem.saveRecipe(site, { name: a.name, description: a.description, steps, source: msg.source });
+      return `${replaced ? 'Updated' : 'Saved'} recipe "${r.name}" for ${site === '*' ? 'every site' : site}: ${r.steps.length} steps${r.params.length ? `, params ${r.params.join(', ')}` : ''}.\n` +
+        `Run it: recipe {action:"run", name:"${r.name}"${r.params.length ? `, params:{${r.params.map(p => `${p}:"…"`).join(', ')}}` : ''}}`;
+    }
+    if (act !== 'run') throw new Error(`Unknown action "${act}". Use run, save, list, get or delete.`);
+    const r = mem.findRecipe(a.name, a.site ? siteOf(a.site) : where.has(msg.agent) ? siteOf(where.get(msg.agent)) : null);
+    const steps = fill(r.steps, a.params || {});
+    if (!b) throw new Error(noBrowser(msg.browser));
+    const out = withHint(msg.agent, await ask(b, 'batch', { steps, tab: a.tab, snapshot: a.snapshot }, msg.agent,
+      120000 + steps.reduce((n, s) => n + (+s.timeout || +s.ms || 0), 0)));
+    const text = out.error || (typeof out.result === 'string' ? out.result : out.result?.text) || '';
+    const failed = out.error || /^Step \d+ \(\w+\) failed: .*/m.exec(text)?.[0];
+    mem.recordRun(r.site, r.name, failed);
+    if (failed) {
+      const tip = `\nRecipe "${r.name}" did not finish; the site may have changed. Finish the task by hand, then fix the recipe: recipe {action:"save", name:"${r.name}", steps:[…]} (same name replaces it).`;
+      if (out.error) out.error += tip; else if (typeof out.result === 'string') out.result += tip; else out.result.text += tip;
+    }
+    return out;
+  }
+  // Daemon-side tools reply {result} or {error}; recipe run passes the extension's reply through.
+  const local = async (fn, msg) => {
+    try { const r = await fn(msg); return typeof r === 'string' ? { result: r } : r; }
+    catch (e) { return { error: e.message }; }
+  };
+
   const server = http.createServer(async (req, res) => {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     // Web pages always send Origin; agents never do. The token blocks other local processes.
@@ -143,11 +237,13 @@ function serve() {
     let msg;
     try { msg = JSON.parse(body); } catch { return reply(400, { error: 'bad json' }); }
     if (msg.tool === 'watch') return reply(200, await watch(msg));
-    if (msg.tool === 'probe') return reply(200, { error: 'probe is internal' });
+    if (msg.tool === 'memory') return reply(200, await local(memory, msg));
+    if (msg.tool === 'recipe') return reply(200, await local(recipe, msg));
+    if (msg.tool === 'probe' || msg.tool === 'locators') return reply(200, { error: `${msg.tool} is internal` });
     const b = pick(msg.browser, msg.agent);
     if (!b) return reply(200, { error: noBrowser(msg.browser) });
     last.set(msg.agent, b);
-    reply(200, await ask(b, msg.tool, msg.args || {}, msg.agent, (msg.args?.timeout || 0) + 60000));
+    reply(200, withHint(msg.agent, await ask(b, msg.tool, msg.args || {}, msg.agent, (msg.args?.timeout || 0) + 60000), msg.tool));
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 << 20 });
@@ -204,14 +300,15 @@ async function ensureDaemon() {
 async function callTool(tool, args) {
   const { browser, ...rest } = args;
   let st = await ensureDaemon();
-  const daemonOnly = tool === 'watch' && rest.action !== 'add';
+  // Calls the daemon answers by itself do not wait for a browser to connect.
+  const daemonOnly = (tool === 'watch' && rest.action !== 'add') || tool === 'memory' || (tool === 'recipe' && !/^(run|save)$/.test(rest.action || 'list'));
   // A sleeping extension reconnects on its 30s alarm; wait for it instead of failing the first call.
   for (let i = 0; !daemonOnly && !st.browsers.length && i < 70; i++) { await sleep(500); st = await request('/status'); }
   const t0 = Date.now();
   // watch wait: the daemon holds each request up to 4 minutes, so loop for longer waits (timeout 0 = until an event).
   const wait = tool === 'watch' && rest.action === 'wait', end = rest.timeout === 0 ? Infinity : t0 + (rest.timeout ?? 60000);
   let r;
-  do r = await request('/call', { tool, args: wait ? { ...rest, timeout: Math.min(end - Date.now(), 240000) } : rest, browser, agent: AGENT });
+  do r = await request('/call', { tool, args: wait ? { ...rest, timeout: Math.min(end - Date.now(), 240000) } : rest, browser, agent: AGENT, source: SOURCE });
   while (wait && r.result === NO_EVENTS && Date.now() < end - 1000);
   const out = r.error ? { text: 'Error: ' + r.error } : typeof r.result === 'string' ? { text: r.result } : r.result;
   if (process.env.REINS_METER) // per-call usage log for cost tracking of long-running agents
@@ -225,6 +322,8 @@ const ref = { type: 'string', description: 'Element ref from the latest snapshot
 const tab = { type: 'number', description: 'Tab id. Default: your own target tab (each agent session gets its own)' };
 const browser = { type: 'string', description: 'chrome, edge, ... (only when several browsers are connected)' };
 const after = { type: 'boolean', description: 'Default returns a diff of what changed. true = full snapshot, false = nothing' };
+const find = { type: 'object', description: 'Instead of ref: the role and name as the snapshot shows them, e.g. {role:"button", name:"Save"}; nth:2 picks the second match. Survives reloads and new sessions, so recipes use it',
+  properties: { role: { type: 'string' }, name: { type: 'string' }, nth: { type: 'number' } } };
 const tool = (name, description, properties, required = []) =>
   ({ name, description, inputSchema: { type: 'object', properties: { ...properties, tab, browser }, required } });
 const TOOLS = [
@@ -238,23 +337,23 @@ const TOOLS = [
     viewport: { type: 'boolean', description: 'Only what is on screen' }, query: { type: 'string', description: 'Only lines containing these words' },
     max: { type: 'number', description: 'Char budget, default 8000' }, hrefs: { type: 'boolean', description: 'Show link URLs (off by default to save tokens)' } }),
   tool('click', 'Real mouse click on a ref (scrolls into view, checks nothing covers it) or at x,y of the last screenshot.', {
-    ref, x: { type: 'number' }, y: { type: 'number' }, double: { type: 'boolean' }, button: { type: 'string', enum: ['left', 'right', 'middle'] },
+    ref, find, x: { type: 'number' }, y: { type: 'number' }, double: { type: 'boolean' }, button: { type: 'string', enum: ['left', 'right', 'middle'] },
     force: { type: 'boolean', description: 'Click even if covered' }, snapshot: after }),
   tool('type', 'Type into a field (replaces its content unless clear:false).', {
-    ref, text: { type: 'string' }, clear: { type: 'boolean' }, submit: { type: 'boolean', description: 'Press Enter after' },
-    slowly: { type: 'boolean', description: 'Key-by-key, for widgets that need keystrokes' }, snapshot: after }, ['ref']),
+    ref, find, text: { type: 'string' }, clear: { type: 'boolean' }, submit: { type: 'boolean', description: 'Press Enter after' },
+    slowly: { type: 'boolean', description: 'Key-by-key, for widgets that need keystrokes' }, snapshot: after }),
   tool('press', 'Press keys: "Enter", "Escape", "Control+a", "Shift+Tab". Optional ref to focus first.', {
-    key: { type: 'string' }, keys: { type: 'array', items: { type: 'string' } }, ref, snapshot: after }),
-  tool('select', 'Choose an option in a native <select> by value or visible text.', { ref, value: { type: 'string' }, snapshot: after }, ['ref', 'value']),
-  tool('hover', 'Move the mouse over a ref (menus, tooltips).', { ref, snapshot: after }, ['ref']),
+    key: { type: 'string' }, keys: { type: 'array', items: { type: 'string' } }, ref, find, snapshot: after }),
+  tool('select', 'Choose an option in a native <select> by value or visible text.', { ref, find, value: { type: 'string' }, snapshot: after }, ['value']),
+  tool('hover', 'Move the mouse over a ref (menus, tooltips).', { ref, find, snapshot: after }),
   tool('scroll', 'Scroll the page, or the scrollable area under ref. With ref and no direction: scroll ref into view.', {
-    ref, direction: { type: 'string', enum: ['down', 'up', 'left', 'right'] }, amount: { type: 'number', description: 'Screens, default 0.8' }, snapshot: after }),
+    ref, find, direction: { type: 'string', enum: ['down', 'up', 'left', 'right'] }, amount: { type: 'number', description: 'Screens, default 0.8' }, snapshot: after }),
   tool('upload', 'Attach local files via a file input or an upload button ref.', {
-    ref, paths: { type: 'array', items: { type: 'string' }, description: 'Absolute file paths' }, snapshot: after }, ['ref', 'paths']),
+    ref, find, paths: { type: 'array', items: { type: 'string' }, description: 'Absolute file paths' }, snapshot: after }, ['paths']),
   tool('screenshot', 'JPEG of the visible viewport. Use only when layout/visuals matter; snapshot is cheaper.', {
     maxWidth: { type: 'number', description: 'Default 1280' }, quality: { type: 'number', description: '1-100, default 60' } }),
   tool('eval', 'Run JavaScript in the page and return the JSON result. With ref, `el` is that element. Use `return` for multi-statement code.', {
-    code: { type: 'string' }, ref, max: { type: 'number' } }, ['code']),
+    code: { type: 'string' }, ref, find, max: { type: 'number' } }, ['code']),
   tool('batch', 'Run several actions in ONE call, e.g. fill a whole form and click Save. Each step is {tool, ...args} for click/type/press/select/hover/scroll/upload/wait/navigate/eval/snapshot. Stops at the first failure. Returns one diff for the whole sequence. Use it whenever you already know the next refs.', {
     steps: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' } }, required: ['tool'] } }, snapshot: after }, ['steps']),
   tool('wait','Wait until text appears (or is gone) or the URL contains a string; or sleep ms.', {
@@ -275,11 +374,22 @@ const TOOLS = [
     id: { type: 'string', description: 'remove: watch id' }, all: { type: 'boolean', description: 'remove: all watches' },
     timeout: { type: 'number', description: 'wait: ms, default 60000; 0 = until an event' },
     run: { type: 'string', description: 'CLI only: shell command to run on each event; it gets REINS_EVENT_FILE' } }),
+  tool('memory', 'Notes about websites, shared by every agent on this machine. Opening a site that has notes or recipes shows them in the reply. Remember facts that would save the next agent turns (the API a site calls, where a setting hides, a step that needs slowly:true). Never secrets or personal data.', {
+    action: { type: 'string', enum: ['recall', 'remember', 'forget', 'list'], description: 'recall (default): notes + recipes for a site; list: every site with memory' },
+    text: { type: 'string', description: 'remember: one fact, at most 500 chars' }, id: { type: 'string', description: 'forget: note id' },
+    site: { type: 'string', description: 'Host like github.com, or * for every site. Default: the site of your current tab' } }),
+  tool('recipe', 'Saved workflows any agent can run later in ONE call: a list of batch steps. After a multi-step task that will come up again, save it. Refs in steps become role+name locators automatically; write {{param}} in values to fill at run time.', {
+    action: { type: 'string', enum: ['run', 'save', 'list', 'get', 'delete'] }, name: { type: 'string', description: 'Letters, digits, - and _' },
+    description: { type: 'string', description: 'save: what it does, one line' },
+    steps: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' } }, required: ['tool'] }, description: 'save: batch steps, e.g. [{tool:"click", find:{role:"button", name:"New issue"}}, {tool:"type", find:{role:"textbox", name:"Title"}, text:"{{title}}"}]' },
+    params: { type: 'object', description: 'run: values for the {{params}}' },
+    site: { type: 'string', description: 'Host the recipe belongs to, or * for any site. Default: the site of your current tab' }, snapshot: after }),
 ];
 
 // ---------- MCP stdio server ----------
 function mcp() {
   AGENT = process.env.REINS_AGENT || `mcp-${process.pid}`;
+  SOURCE = 'agent';
   const out = m => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\n');
   require('readline').createInterface({ input: process.stdin }).on('line', async line => {
     let m;
