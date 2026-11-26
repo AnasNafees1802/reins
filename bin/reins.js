@@ -316,7 +316,15 @@ const exists = p => fs.existsSync(p);
 const readJson = p => exists(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
 const writeJson = (p, j) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(j, null, 2)); };
 
-// Each agent: where it lives (to detect it), how to register the MCP server, where its skills go.
+// A /reins command for agents whose slash menu lists command files, not skills. `task` is the agent's
+// placeholder for what the user typed after the command (agents without one append it themselves).
+const SLASH_DESC = "Drive my real Chrome or Edge with Reins";
+const slash = task => `Use Reins for this: drive the user's real, already-running Chrome or Edge (their logged-in sessions and open tabs) with the reins MCP tools, following the reins skill if you have it. Start with tabs or snapshot.\n\nTask: ${task}\n`;
+const slashMd = (task = 'what the user wrote after this command') => `---\ndescription: ${SLASH_DESC}\n---\n${slash(task)}`;
+const slashToml = () => `description = "${SLASH_DESC}"\nprompt = """\n${slash('{{args}}')}"""\n`;
+
+// Each agent: where it lives (to detect it), how to register the MCP server, where its skills go,
+// and cmd: [file, text] for the /reins command where the slash menu does not already list skills.
 const AGENTS = [
   { name: 'Claude Code', home: '.claude', skills: '.claude/skills', add() {
       const cp = require('child_process'), o = { stdio: 'ignore', shell: process.platform === 'win32' && !onPath('claude.exe') }; // npm-installed claude is a .cmd shim
@@ -325,7 +333,7 @@ const AGENTS = [
       const r = cp.spawnSync('claude', ['mcp', 'add', '--scope', 'user', 'reins', '--', q(SERVER.command), q(__filename), 'mcp'], o);
       if (r.status !== 0) throw new Error('`claude` CLI not found on PATH');
     } },
-  { name: 'Codex', home: '.codex', skills: '.codex/skills', add() {
+  { name: 'Codex', home: '.codex', skills: '.codex/skills', cmd: ['.codex/prompts/reins.md', slashMd('$ARGUMENTS')], add() {
       const p = path.join(HOME, '.codex/config.toml');
       const q = s => `'${s}'`; // TOML literal strings: no escaping of Windows backslashes
       const block = `[mcp_servers.reins]\ncommand = ${q(SERVER.command)}\nargs = [${SERVER.args.map(q).join(', ')}]\ntool_timeout_sec = 120\n`;
@@ -333,29 +341,29 @@ const AGENTS = [
       const re = /^\[mcp_servers\.reins\][\s\S]*?(?=^\[|(?![\s\S]))/m; // up to the next table header at line start
       fs.writeFileSync(p, re.test(t) ? t.replace(re, block + '\n') : t.trimEnd() + '\n\n' + block);
     } },
-  { name: 'OpenCode', home: '.config/opencode', skills: '.config/opencode/skills', add() {
+  { name: 'OpenCode', home: '.config/opencode', skills: '.config/opencode/skills', cmd: ['.config/opencode/command/reins.md', slashMd('$ARGUMENTS')], add() {
       const d = path.join(HOME, '.config/opencode');
       const p = ['opencode.json', 'opencode.jsonc'].map(f => path.join(d, f)).find(exists) || path.join(d, 'opencode.json');
       const j = readJson(p);
       (j.mcp ||= {}).reins = { type: 'local', command: [SERVER.command, ...SERVER.args], enabled: true, timeout: 120000 };
       writeJson(p, j);
     } },
-  { name: 'Antigravity', home: '.gemini/config', skills: '.gemini/config/skills', add() {
+  { name: 'Antigravity', home: '.gemini/config', skills: '.gemini/config/skills', cmd: ['.gemini/config/global_workflows/reins.md', slashMd()], add() {
       const p = path.join(HOME, '.gemini/config/mcp_config.json'), j = readJson(p);
       (j.mcpServers ||= {}).reins = SERVER;
       writeJson(p, j);
     } },
-  { name: 'Gemini CLI', home: '.gemini/settings.json', skills: '.gemini/skills', add() {
+  { name: 'Gemini CLI', home: '.gemini/settings.json', skills: '.gemini/skills', cmd: ['.gemini/commands/reins.toml', slashToml()], add() {
       const p = path.join(HOME, '.gemini/settings.json'), j = readJson(p);
       (j.mcpServers ||= {}).reins = { ...SERVER, timeout: 120000 };
       writeJson(p, j);
     } },
-  { name: 'Cursor', home: '.cursor', skills: null, add() {
+  { name: 'Cursor', home: '.cursor', skills: '.cursor/skills', cmd: ['.cursor/commands/reins.md', slashMd()], add() {
       const p = path.join(HOME, '.cursor/mcp.json'), j = readJson(p);
       (j.mcpServers ||= {}).reins = SERVER;
       writeJson(p, j);
     } },
-  { name: 'Windsurf', home: '.codeium/windsurf', skills: null, add() {
+  { name: 'Windsurf', home: '.codeium/windsurf', skills: null, cmd: ['.codeium/windsurf/global_workflows/reins.md', slashMd()], add() {
       const p = path.join(HOME, '.codeium/windsurf/mcp_config.json'), j = readJson(p);
       (j.mcpServers ||= {}).reins = SERVER;
       writeJson(p, j);
@@ -393,7 +401,12 @@ async function install(opts) {
         fs.mkdirSync(d, { recursive: true });
         fs.copyFileSync(path.join(ROOT, 'skill/SKILL.md'), path.join(d, 'SKILL.md'));
       }
-      console.log(`   ✓ ${a.name}${a.skills ? ' (tools + skill)' : ' (tools)'}`);
+      if (a.cmd) {
+        const f = path.join(HOME, a.cmd[0]);
+        fs.mkdirSync(path.dirname(f), { recursive: true });
+        fs.writeFileSync(f, a.cmd[1]);
+      }
+      console.log(`   ✓ ${a.name} (tools${a.skills ? ' + skill' : ''} + /reins)`);
     } catch (e) { console.log(`   ✗ ${a.name}: ${e.message}`); }
   }
   if (exists(path.join(HOME, '.agents'))) { // shared skills folder some agents read

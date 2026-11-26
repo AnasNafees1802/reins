@@ -85,16 +85,16 @@ Chrome and Edge only allow automatic installs for extensions from their stores, 
 
 ### Supported agents and browsers
 
-| Agent | Registered in | Skill |
-|---|---|---|
-| Claude Code | `claude mcp add --scope user` | `~/.claude/skills/reins` |
-| Codex | `~/.codex/config.toml` | `~/.codex/skills/reins` |
-| OpenCode | `~/.config/opencode/opencode.json(c)` | `~/.config/opencode/skills/reins` |
-| Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/skills/reins` |
-| Gemini CLI | `~/.gemini/settings.json` | `~/.gemini/skills/reins` |
-| Cursor | `~/.cursor/mcp.json` | |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` | |
-| Anything with a shell | `reins <tool> key=value` | |
+| Agent | Registered in | Skill | `/reins` command |
+|---|---|---|---|
+| Claude Code | `claude mcp add --scope user` | `~/.claude/skills/reins` | `/reins` (the skill) |
+| Codex | `~/.codex/config.toml` | `~/.codex/skills/reins` | `/prompts:reins`, or `$reins` for the skill |
+| OpenCode | `~/.config/opencode/opencode.json(c)` | `~/.config/opencode/skills/reins` | `~/.config/opencode/command/reins.md` |
+| Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/skills/reins` | `~/.gemini/config/global_workflows/reins.md` |
+| Gemini CLI | `~/.gemini/settings.json` | `~/.gemini/skills/reins` | `~/.gemini/commands/reins.toml` |
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/skills/reins` | `~/.cursor/commands/reins.md` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | | `~/.codeium/windsurf/global_workflows/reins.md` |
+| Anything with a shell | `reins <tool> key=value` | | |
 
 Browsers: Chrome, Edge, Brave, Opera (anything Chromium). Firefox and Safari have no debugger API for extensions, so they are not supported.
 
