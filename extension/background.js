@@ -39,7 +39,8 @@ async function onMsg(m) {
     const agent = m.agent || 'default', result = await fn(await locate({ ...(m.args || {}), agent }));
     // The agent's tab URL rides along, so the daemon can show what it remembers about that site.
     const tid = agent === 'watch' ? null : cur.get(agent);
-    send({ id: m.id, result, url: tid == null ? undefined : (await chrome.tabs.get(tid).catch(() => null))?.url });
+    if (tid != null && !urls.has(tid)) urls.set(tid, (await chrome.tabs.get(tid).catch(() => null))?.url);
+    send({ id: m.id, result, url: tid == null ? undefined : urls.get(tid) });
   } catch (e) {
     send({ id: m.id, error: String(e?.message || e) });
   }
@@ -61,7 +62,10 @@ chrome.storage.session.get('paused').then(v => { paused = !!v.paused; badge(); }
 connect();
 
 // ---------- tab + debugger state ----------
-chrome.tabs.onRemoved.addListener(id => { T.delete(id); for (const [k, v] of cur) if (v === id) cur.delete(k); });
+// tabId -> URL, kept current by tab events, so a reply does not wait on chrome.tabs.get to report its URL.
+const urls = new Map();
+chrome.tabs.onUpdated.addListener((id, ch, t) => { if (t?.url) urls.set(id, t.url); });
+chrome.tabs.onRemoved.addListener(id => { T.delete(id); urls.delete(id); for (const [k, v] of cur) if (v === id) cur.delete(k); });
 chrome.tabs.onCreated.addListener(t => { const s = T.get(t.openerTabId); if (s?.watching) s.opened.push(t.id); });
 chrome.debugger.onDetach.addListener((src, reason) => {
   T.delete(src.tabId);

@@ -211,9 +211,23 @@ and `recipe action:"run" name:"new-issue" params:{title:"Login broken"}` does th
 
 - Steps use `find:{role, name}` (from the snapshot), not refs, so a recipe still works after reloads and in new sessions. Several matches need `nth`, so a recipe never clicks the wrong "Save". Each step waits up to 3 s for its element to appear.
 - A failed run says which step broke and records it (`recipe` lists runs and the last error), so the next agent knows to fix the recipe instead of trusting it.
-- Memory is shown at most once per site per agent session, capped at about 1,500 characters, and framed as data rather than instructions.
-- Nothing secret is stored. Notes and steps that look like passwords, tokens or keys are refused, and typing into a password-like field must use a `{{param}}`.
-- `site:"*"` holds notes and recipes for every site. Your CLI notes are marked `user`, agent notes `agent`.
+- Memory is shown once per site per agent session, capped at about 1,500 characters, and framed as data rather than instructions.
+
+#### You approve what agents save
+
+Text on a web page can talk an agent into saving memory, and memory reaches every later agent. So:
+
+- **An agent can only save memory for the site its tab is on.** A malicious page can only write memory for its own site, never for your bank or for every site.
+- **What an agent saves waits for you.** Its notes and recipes stay pending. The agent that saved them can use them, but other agents only see "2 items wait for review" until you approve them:
+  ```
+  reins review        # shows each pending note and every step of each recipe: approve, reject (deletes) or skip
+  ```
+  `reins review` only works in an interactive terminal, and MCP calls can never approve anything.
+- **Recipes can only act on the page.** Steps can click, type, press, select, hover, scroll, wait, snapshot and navigate, but not `eval` or `upload`, and `navigate` can only load pages on the recipe's own site. A recipe only runs while your tab is on its site. These rules are checked on save and again on every run, so a hand-edited file cannot get around them.
+- **Only you write memory for every site** (`site:"*"`), from a terminal, or by adding lines to `~/.reins/memory/sites/_all.md`. A line you add as `- text` counts as approved.
+- **Secrets are refused, best effort.** Notes and steps are refused when they look like a labelled secret (`password: …`), a known key format (`sk_live_…`, `ghp_…`, `AKIA…`), a JWT, or a long random-looking string. Typing into a password-like field in a recipe must use a `{{param}}`. Review is the real safety net.
+
+What this does not cover: an agent that already runs shell commands as you can edit these files or call the daemon directly. The rules above guard what a prompt-injected agent can do through the Reins tools.
 
 ## Run several agents at once
 
@@ -304,6 +318,7 @@ reins batch @steps.json       # several actions in one call (use @file on PowerS
 reins network action=start reload=true
 reins watch action=wait timeout=0
 reins status                  # which browsers are connected
+reins review                  # approve or reject memory that agents saved
 reins reload-extension        # after editing extension/ (run reins install to copy it first)
 ```
 
