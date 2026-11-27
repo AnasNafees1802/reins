@@ -94,6 +94,25 @@ try {
   assert.match(filters, /checkbox "4 stars and up"/);
   assert.strictEqual(filters.match(/Add to cart/g).length, 1, 'button label not repeated as a text line');
 
+  // find: act by role and name instead of a ref.
+  reins('navigate', { tab, url: 'http://localhost:8701/', snapshot: false });
+  reins('type', { tab, find: { role: 'textbox', name: 'Your name' }, text: 'Ada', snapshot: false });
+  assert.match(reins('click', { tab, find: { role: 'button', name: 'Go' } }), /clicked Ada/, 'find clicks the right button');
+  assert.match(reins('click', { tab, find: { role: 'button', name: 'Nope' } }), /No button named "Nope"/);
+
+  // recipe: save from refs (they become locators), run in one call, only on its own site, then clean up.
+  // The CLI here has no terminal, so it counts as an agent: what it saves stays pending, usable only by itself.
+  const refOf = (out, re) => new RegExp(`\\[(e\\d+)\\] ${re}`).exec(out)?.[1];
+  const page = reins('snapshot', { tab, query: 'Your name|button Go' });
+  const steps = [{ tool: 'type', ref: refOf(page, 'textbox "Your name"'), text: '{{who}}' }, { tool: 'click', ref: refOf(page, 'button "Go"') }];
+  assert.match(reins('recipe', { action: 'save', name: 'e2e-greet', description: 'e2e test', steps }), /Saved recipe "e2e-greet" for localhost/);
+  assert.match(reins('recipe', { action: 'save', name: 'e2e-bad', steps: [{ tool: 'eval', code: '1' }] }), /no eval or upload/);
+  assert.match(reins('memory', { action: 'remember', text: 'x', site: '*' }), /Only the user can write memory for every site/);
+  reins('navigate', { tab, reload: true, snapshot: false });
+  assert.match(reins('recipe', { action: 'run', name: 'e2e-greet', params: { who: 'Grace' } }), /clicked Grace/, 'recipe ran after a reload');
+  assert.match(reins('recipe', { action: 'run', name: 'e2e-greet', params: { who: 'x' } }, 'e2e-other'), /No recipe|waits for the user/, 'another agent cannot run a pending recipe');
+  assert.match(reins('recipe', { action: 'delete', name: 'e2e-greet' }), /Deleted/);
+
   console.log('\nE2E OK');
 } catch (e) {
   console.error('\nE2E FAILED:', e.message);
