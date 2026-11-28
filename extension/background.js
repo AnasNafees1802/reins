@@ -323,7 +323,10 @@ function walker(o) {
     // off = not shown: outside the viewport (viewport mode) or parked where no scroll can reach (closed drawers).
     const off = !sized ? c.off : o.viewport ? !(r.bottom > 0 && r.right > 0 && r.top < H && r.left < W)
       : r.right + scrollX <= 0 || r.bottom + scrollY <= 0 || r.left + scrollX >= SW;
-    const k = sized && cs.visibility !== 'hidden' ? kind(el, cs, c.ptr) : null;
+    // A checkbox or radio that is not rendered (display:none, no size) is used through its label: list the label as it.
+    const box = tag === 'label' && /^(checkbox|radio)$/.test(el.control?.type || '') ? el.control : null;
+    const ctl = box && (!box.getBoundingClientRect().width || !box.getBoundingClientRect().height || getComputedStyle(box).visibility === 'hidden') ? box : null;
+    const k = sized && cs.visibility !== 'hidden' ? (ctl ? ctl.type : kind(el, cs, c.ptr)) : null;
     const nc = { ptr: cs.cursor === 'pointer', quiet: c.quiet, off, ctl: c.ctl };
     let dialog = false;
     if (k === 'link' && !off && o.mode !== 'interactive' && cs.display.startsWith('inline') && /\S/.test(text)) {
@@ -334,10 +337,10 @@ function walker(o) {
     }
     if (k && !off) {
       flush();
-      let at = attrs(el, k);
-      let nm = nameOf(el, k);
+      let at = attrs(ctl || el, k);
+      let nm = ctl ? clean(el.innerText) : nameOf(el, k);
       if (c.ctl && c.ctl === nm) return walk(el.shadowRoot || el, { ...nc, quiet: true, ptr: true, ctl: nm }); // same control nested in itself (tab > link)
-      if ((FIELD.has(k) || k === 'clickable') && !el.getAttribute('aria-label')) {
+      if (!ctl && (FIELD.has(k) || k === 'clickable') && !el.getAttribute('aria-label')) {
         const lab = labelOf(el);
         if (lab && lab !== nm) nm ? (at = `(${lab}) ` + at) : (nm = lab);
       }
@@ -577,13 +580,14 @@ async function related(h, fn) {
   const r = await cdp(h.s.tabId, 'Runtime.callFunctionOn', { objectId: h.objectId, functionDeclaration: fn, returnByValue: false }, h.sid);
   return r.result?.objectId ? { ...h, objectId: r.result.objectId } : null;
 }
-const TOGGLE = "function(){ return this.localName === 'input' && /^(checkbox|radio)$/.test(this.type) ? { checked: this.checked, radio: this.type === 'radio' } : null; }";
+// The ref may be the input itself, or a label that stands in for a hidden one (see walker).
+const TOGGLE = "function(){ const c = this.localName === 'label' ? this.control : this; return c && c.localName === 'input' && /^(checkbox|radio)$/.test(c.type) ? { checked: c.checked, radio: c.type === 'radio' } : null; }";
 // A click that "worked" on a custom checkbox or radio can leave it unchanged: check, and fall back to the label.
 async function confirmToggle(h, tog) {
   if (tog.radio && tog.checked) return '';
-  const want = tog.radio || !tog.checked, now = () => call(h, 'function(){ return this.checked; }');
+  const want = tog.radio || !tog.checked, now = () => call(h, "function(){ return (this.localName === 'label' ? this.control : this).checked; }");
   if (await now() === want) return '';
-  await call(h, 'function(){ (this.labels?.[0] || this).click(); }');
+  await call(h, "function(){ (this.localName === 'label' ? this : this.labels?.[0] || this).click(); }");
   await settle(h.s);
   if (await now() === want) return '(The mouse click did not change it, so Reins clicked its label.)\n';
   return `Note: the ${tog.radio ? 'radio' : 'checkbox'} is still ${want ? 'unchecked' : 'checked'} after the click.\n`;

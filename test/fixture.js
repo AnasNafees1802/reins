@@ -71,6 +71,7 @@ const forms = `<!doctype html><title>Forms</title><h1>Forms</h1>
 <input aria-label="Salary" oninput="const d=this.value.replace(/\\D/g,'');this.value=d?(+d).toLocaleString('en-IN'):''">
 <label><input type=checkbox id=remote style="position:absolute;opacity:0"><span style="display:inline-block;width:14px;height:14px;border:1px solid"></span> Remote only</label>
 <script style="display:block;font-size:1px">var leaked = 42;</script>
+<div><input type=checkbox id=t1 style="display:none"><label for=t1>AWS</label> <input type=checkbox id=t2 style="display:none"><label for=t2>Azure</label> <label><input type=radio name=sh style="display:none"> Day shift</label></div>
 <button id=open onclick="dlg.hidden=false">Edit education</button>
 <div id=dlg hidden role=dialog aria-modal=true aria-label="Education">
   <input aria-label="Course" value="MCA">

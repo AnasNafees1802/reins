@@ -51,6 +51,16 @@ try {
     assert.match(reins('snapshot', { tab, query: 'checkbox' }), /checkbox "Remote only" checked/, out);
   });
 
+  check('a checkbox or radio hidden behind its label is listed and clickable', () => {
+    const list = reins('snapshot', { tab, query: 'checkbox|radio' });
+    assert.match(list, /checkbox "AWS"/, list);
+    assert.match(list, /radio "Day shift"/, list);
+    const out = reins('click', { tab, find: { role: 'checkbox', name: 'AWS' } });
+    assert.match(out, /checkbox "AWS" checked/, out);
+    assert.doesNotMatch(reins('snapshot', { tab, query: 'Azure' }), /checked/, 'the other box is untouched');
+    assert.match(reins('click', { tab, find: { role: 'radio', name: 'Day shift' } }), /radio "Day shift" checked/);
+  });
+
   check('the reply says when a dialog closed, even after a stale-ref failure', () => {
     openDialog();
     const course = refOf(reins('snapshot', { tab, query: 'Course' }), 'textbox "Course"');
@@ -103,7 +113,8 @@ try {
       const out = reins('tabs', { action: 'use', tab });
       assert.match(out, new RegExp(`Target tab is now ${tab}`), out);
       assert.match(reins('snapshot', { max: 200 }), /^Forms \|/m);
-      assert.doesNotMatch(reins('tabs', {}), new RegExp(`${tab} \\(active\\)`), 'tab stayed in the background');
+      const list = reins('tabs', {});
+      assert.doesNotMatch(list, new RegExp(`${tab} \\(active\\)`), 'tab stayed in the background\n' + list);
       assert.match(reins('tabs', { action: 'use', tab: two }, 'forms-other'), /Target tab is now/, 'a free tab can be used by another agent');
       assert.match(reins('tabs', { action: 'use', tab }, 'forms-other'), /in use by another agent/, "another agent's tab is refused");
     } finally { reins('tabs', { action: 'close', tab: two }, 'forms-other'); }
