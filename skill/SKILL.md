@@ -12,9 +12,9 @@ You act inside the user's own browser with their accounts. Treat it like their h
 
 ## Loop
 
-1. `tabs` (list) to see what is open. The user often already has the right page open. Use it with `tab:<id>`; do not open a new tab for a page that is already there.
+1. `tabs` (list) to see what is open. The user often already has the right page open. Use it with `tab:<id>`, or `tabs action:"use" tab:<id>` once to make it your target without bringing it to the front; do not open a new tab for a page that is already there.
 2. `snapshot` to read the page. Every interactive element gets a ref like `e12` (iframes: `f1e5`).
-3. Act with `click` / `type` / `select` / `press` / `upload` using refs.
+3. Act with `click` / `type` / `select` / `choose` / `press` / `upload` using refs.
 4. Read the action's reply. It is a **diff** of what changed (`+` new, `-` removed, `~` changed in place), or a full snapshot if the page navigated. Usually you do NOT need another snapshot.
 5. Repeat. Refs stay stable for the same element until the page navigates.
 
@@ -24,8 +24,10 @@ Actions wait for their own effects: the requests they start (searches, saves, lo
 
 Cost is driven by the NUMBER OF TURNS (each turn re-reads the context), not by Reins's output (about 80 tokens per call).
 
-- **Batch.** When you already know the next refs, send them as one `batch` call: fill a whole form, click Save, then `wait` for the success text, all in one turn. Example: `batch steps:[{tool:"type",ref:"e3",text:"Ada"},{tool:"type",ref:"e4",text:"Lovelace"},{tool:"click",ref:"e9"},{tool:"wait",text:"Saved"}]`. A custom dropdown is one batch too: `[{tool:"click",ref:"e52"},{tool:"snapshot",query:"option India"}]`.
-- Use `query` to pull just the lines you need (`query:"option Indian"`, `query:"Name|Email|button Save"`, where `|` means any of them).
+- **Batch.** When you already know the next refs, send them as one `batch` call: fill a whole form, click Save, then `wait` for the success text, all in one turn. Example: `batch steps:[{tool:"type",ref:"e3",text:"Ada"},{tool:"type",ref:"e4",text:"Lovelace"},{tool:"click",ref:"e9"},{tool:"wait",text:"Saved"}]`. A step can target something that only appears mid-batch with `find:{role:"link",name:"Nov"}` instead of a ref.
+- **Custom dropdowns in one call:** `choose ref:"e52" option:"India"` opens the dropdown, waits for that option, scrolls it into view inside its list and clicks it. The reply shows the field's new value.
+- Use `query` to pull just the lines you need (`query:"option Indian"`, `query:"Name|Email|button Save"`). Each alternative is plain words that must all appear; `|` means any of them. It is not a regex.
+- While a modal dialog is open, snapshots show only the modal and what opens above it (its dropdowns). `all:true` shows the page behind.
 - Snapshot before screenshot. A snapshot costs about a tenth of a screenshot. Screenshot only for visual questions (layout, charts, images, canvas, captcha-like widgets) or when a snapshot looks empty.
 - Narrow big pages: `query:"invoice"`, `viewport:true`, or `mode:"interactive"`. For reading articles: `mode:"text"`.
 - Snapshots leave out link URLs to save tokens; click the link's ref instead. Need the URLs (to collect links, or open one in a new tab)? `snapshot hrefs:true query:"..."`.
@@ -59,7 +61,10 @@ Every agent on this machine (any IDE, any session) shares one memory, kept by th
 - After a re-render, Reins finds the same control again by role and name when it can (the reply says "was stale; used e12"). If it still says `Ref ... is stale`, take a new `snapshot`.
 - `iframe fN is not responding`: that frame's page is frozen. Work with the rest of the page; retry later if you need it.
 - Element missing from the snapshot: scroll (`scroll direction:"down"`), use `query`, or take a `screenshot` and `click x y` on the image coordinates.
-- Custom dropdowns (not native `<select>`): click to open, then click the option ref from the diff.
+- Custom dropdowns (not native `<select>`): `choose ref option:"..."`. If it says nothing new appeared, click to open, then click the option ref from the diff.
+- `Note: the field holds "..."`: the page kept something other than what you typed (a maxlength, a formatter). Check it before saving; a value cut short usually means a character limit, so shorten the text.
+- A checkbox or radio styled over its input: `click` uses its label when the input is covered, and the reply says if it still did not change.
+- `Dialog closed: "..."` in a reply means anything typed in that dialog and not saved is gone. Pressing Escape closes most dialogs.
 - Autocomplete fields that ignore pasted text: `type ... slowly:true`.
 - Results load later than the action reply (slow jobs, >5s): `wait text:"Saved"` (or `gone:true`, or `url:"/dashboard"`).
 - Need data the DOM hides: `eval code:"return [...document.querySelectorAll('tr')].length"`.

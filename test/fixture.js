@@ -61,6 +61,36 @@ opts.onclick = e => { if (e.target.matches('[role=option]')) { ship.textContent 
 save.onclick = () => modal.hidden = false;
 okbtn.onclick = async () => { modal.hidden = true; msg.textContent = 'Saving'; const r = await (await fetch('/api/save', { method: 'POST', body: ship.textContent })).text(); msg.textContent = 'Saved: ' + r; };
 </script>`;
+// /forms: the Naukri-style cases from a real form-filling session. A skills box whose maxlength shrinks, a radio whose
+// input sits under a decorative circle, a modal that Escape removes, a year picker whose options are a portal list
+// that scrolls inside itself, and a script tag that the page renders as text.
+const forms = `<!doctype html><title>Forms</title><h1>Forms</h1>
+<button onclick="out.textContent='background clicked'">Background action</button>
+<p id=out></p>
+<input aria-label="Skills" maxlength=6>
+<input aria-label="Salary" oninput="const d=this.value.replace(/\\D/g,'');this.value=d?(+d).toLocaleString('en-IN'):''">
+<label><input type=checkbox id=remote style="position:absolute;opacity:0"><span style="display:inline-block;width:14px;height:14px;border:1px solid"></span> Remote only</label>
+<script style="display:block;font-size:1px">var leaked = 42;</script>
+<button id=open onclick="dlg.hidden=false">Edit education</button>
+<div id=dlg hidden role=dialog aria-modal=true aria-label="Education">
+  <input aria-label="Course" value="MCA">
+  <div style="position:relative;height:20px"><input type=radio name=mode id=r1 checked><label for=r1>Full time</label></div>
+  <div style="position:relative;height:20px"><input type=radio name=mode id=r2 style="position:absolute;left:0;top:0;margin:0;opacity:0"><span style="position:absolute;left:0;top:0;width:16px;height:16px;border:1px solid;border-radius:50%;background:#fff"></span><label for=r2 style="margin-left:22px">Distance</label></div>
+  <input id=yr aria-label="Ending year" readonly value="2024">
+</div>
+<div style="height:1200px"></div>
+<script>
+addEventListener('keydown', e => { if (e.key === 'Escape') dlg.remove(); });
+yr.onclick = () => {
+  document.getElementById('yrs')?.remove();
+  const r = yr.getBoundingClientRect(), ul = document.createElement('ul');
+  ul.id = 'yrs';
+  ul.style = 'position:fixed;margin:0;padding:0;list-style:none;background:#fff;border:1px solid;overflow:auto;height:60px;width:120px;left:' + (r.right + 20) + 'px;top:40px';
+  for (let y = 2033; y >= 2000; y--) ul.insertAdjacentHTML('beforeend', '<li><a href="javascript:void 0">' + y + '</a></li>');
+  ul.onclick = e => { if (e.target.localName === 'a') { yr.value = e.target.textContent; ul.remove(); } };
+  document.body.append(ul);
+};
+</script>`;
 // /hung: a cross-site iframe that locks up its own process, so evaluating in it never returns.
 const hung = `<!doctype html><title>Hung</title><h1>Hung frame page</h1><button>Still works</button><iframe src="http://127.0.0.1:8702/busy"></iframe>`;
 const FRUIT = ['Apple', 'Apricot', 'Banana', 'Blueberry', 'Cherry', 'Grape', 'Mango', 'Papaya'];
@@ -85,7 +115,7 @@ http.createServer(async (q, r) => {
   }
   if (q.url === '/api/missing') { r.statusCode = 404; return r.end('nope'); }
   r.setHeader('content-type', 'text/html');
-  r.end(q.url === '/two' ? '<title>Two</title><h1>Second page</h1>' : q.url === '/app' ? app : q.url.startsWith('/hard') ? hard : q.url === '/hung' ? hung : page);
+  r.end(q.url === '/two' ? '<title>Two</title><h1>Second page</h1>' : q.url === '/app' ? app : q.url.startsWith('/hard') ? hard : q.url === '/forms' ? forms : q.url === '/hung' ? hung : page);
 }).listen(8701);
 http.createServer(async (q, r) => {
   // a public cross-origin API: ACAO "*" means the browser blocks the response if credentials were included

@@ -196,7 +196,11 @@ function walker(o) {
   const W = innerWidth, H = innerHeight, SW = Math.max(document.documentElement.scrollWidth, W);
   const meta = { url: location.href, title: document.title, W, H, y: Math.round(scrollY), h: document.documentElement.scrollHeight };
   if (W * H < 100) return { meta, lines: [] };
-  if (o.mode === 'text') return { meta, lines: (document.body?.innerText || '').split('\n').map(l => l.trim()).filter(Boolean) };
+  if (o.mode === 'text') {
+    // innerText includes any <script> or <style> the page renders as text (some widget iframes do): drop those lines.
+    const junk = new Set([...document.querySelectorAll('script,style')].filter(e => e.checkVisibility()).flatMap(e => e.innerText.split('\n').map(l => l.trim())));
+    return { meta, lines: (document.body?.innerText || '').split('\n').map(l => l.trim()).filter(l => l && !junk.has(l)) };
+  }
   const lines = [];
   let text = '';
   const clean = (s, n = 80) => { s = (s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
@@ -362,7 +366,17 @@ function walker(o) {
     if (block || k) flush();
     if (dialog) lines.push('--- end dialog ---');
   }
-  walk(document.body || document.documentElement, { ptr: false, quiet: false, off: false });
+  const root = { ptr: false, quiet: false, off: false };
+  // An open modal makes the page behind it inert: list only the modal and what comes after it in the document,
+  // which is where dropdowns and pickers opened from the modal get appended.
+  const modal = !o.all && [...document.querySelectorAll('dialog,[aria-modal=true]')]
+    .filter(d => (d.getAttribute('aria-modal') === 'true' || d.matches(':modal')) && d.getClientRects().length && getComputedStyle(d).visibility !== 'hidden').pop();
+  if (modal) {
+    lines.push('(A modal dialog is open: showing it and what opens above it. all:true shows the page behind.)');
+    visit(modal, root);
+    for (let a = modal; a && a !== document.body && a !== document.documentElement; a = a.parentElement)
+      for (let n = a.nextElementSibling; n; n = n.nextElementSibling) visit(n, root);
+  } else walk(document.body || document.documentElement, root);
   flush();
   // A text line that only repeats the name of the control next to it (labels rendered beside their button) is noise.
   const named = l => /^\[[^\]]+\] \w+ "([^"]*)"/.exec(l)?.[1];
@@ -415,7 +429,7 @@ function matches(lines, query) {
 }
 async function snapshot(a, s) {
   s ||= await session(a);
-  const opts = { mode: a.mode || 'full', viewport: !!a.viewport, hrefs: !!a.hrefs };
+  const opts = { mode: a.mode || 'full', viewport: !!a.viewport, hrefs: !!a.hrefs, all: !!a.all };
   const { meta, lines } = await collect(s, opts);
   if (opts.mode !== 'text') { s.last = lines; s.lastOpts = opts; s.lastUrl = meta?.url; }
   let shown = lines;
@@ -447,6 +461,10 @@ async function report(s, a, note = '') {
   const before = s.last;
   const { meta, lines } = await collect(s, s.lastOpts);
   s.last = lines;
+  // A dialog opening or closing is easy to miss in a long diff, and closing one can discard what was typed in it.
+  const dlg = ls => new Set(ls.map(l => /^--- dialog (".*") ---$/.exec(l)?.[1]).filter(Boolean));
+  const [d0, d1] = [dlg(before), dlg(lines)];
+  out += [...d0].filter(d => !d1.has(d)).map(d => `Dialog closed: ${d}\n`).join('') + [...d1].filter(d => !d0.has(d)).map(d => `Dialog opened: ${d}\n`).join('');
   if (meta && meta.url !== s.lastUrl) {
     s.lastUrl = meta.url;
     return out + 'Navigated.\n' + render(meta, lines, a.max || 8000);
@@ -541,8 +559,8 @@ async function handle(a) {
   // and we are still on the same page. Saves the agent a snapshot turn.
   const key = refKeys(s.last || []).get(ref);
   if (key && (await chrome.tabs.get(s.tabId)).url === s.lastUrl) {
+    // Not stored in s.last: that is the baseline the reply diffs against, and the action has not happened yet.
     const { lines } = await collect(s, s.lastOpts || { mode: 'full' });
-    s.last = lines;
     const hits = [...refKeys(lines)].filter(([, k]) => k === key);
     const again = hits.length === 1 && await resolve(s, hits[0][0]);
     if (again) { s.note = `(${ref} was stale after a re-render; used ${hits[0][0]}, the same ${key})\n`; return again; }
@@ -554,19 +572,42 @@ async function call(h, fn, args = []) {
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   return r.result.value;
 }
+// A handle for an element related to h (its label, say), or null when fn returns nothing.
+async function related(h, fn) {
+  const r = await cdp(h.s.tabId, 'Runtime.callFunctionOn', { objectId: h.objectId, functionDeclaration: fn, returnByValue: false }, h.sid);
+  return r.result?.objectId ? { ...h, objectId: r.result.objectId } : null;
+}
+const TOGGLE = "function(){ return this.localName === 'input' && /^(checkbox|radio)$/.test(this.type) ? { checked: this.checked, radio: this.type === 'radio' } : null; }";
+// A click that "worked" on a custom checkbox or radio can leave it unchanged: check, and fall back to the label.
+async function confirmToggle(h, tog) {
+  if (tog.radio && tog.checked) return '';
+  const want = tog.radio || !tog.checked, now = () => call(h, 'function(){ return this.checked; }');
+  if (await now() === want) return '';
+  await call(h, 'function(){ (this.labels?.[0] || this).click(); }');
+  await settle(h.s);
+  if (await now() === want) return '(The mouse click did not change it, so Reins clicked its label.)\n';
+  return `Note: the ${tog.radio ? 'radio' : 'checkbox'} is still ${want ? 'unchecked' : 'checked'} after the click.\n`;
+}
 const ACTIONABLE = `function(){
   const r0 = this.getBoundingClientRect();
   if (r0.top < 0 || r0.left < 0 || r0.bottom > innerHeight || r0.right > innerWidth) this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-  const r = this.getBoundingClientRect();
-  if (!r.width || !r.height) return 'element has no size (hidden or collapsed)';
-  const x = r.left + r.width / 2, y = r.top + r.height / 2;
-  let hit = document.elementFromPoint(x, y);
-  while (hit && hit.shadowRoot) { const d = hit.shadowRoot.elementFromPoint(x, y); if (!d || d === hit) break; hit = d; }
-  for (let e = hit; e; e = e.parentNode || e.host) if (e === this) return '';
-  if (hit && hit.closest && hit.closest('label') && hit.closest('label').control === this) return '';
-  if (!hit) return 'element is outside the visible area';
-  const cls = typeof hit.className === 'string' && hit.className.trim() ? '.' + hit.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
-  return 'covered by <' + hit.localName + (hit.id ? '#' + hit.id : '') + cls + '> "' + (hit.innerText || '').trim().slice(0, 50) + '"';
+  const test = () => {
+    const r = this.getBoundingClientRect();
+    if (!r.width || !r.height) return 'element has no size (hidden or collapsed)';
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    let hit = document.elementFromPoint(x, y);
+    while (hit && hit.shadowRoot) { const d = hit.shadowRoot.elementFromPoint(x, y); if (!d || d === hit) break; hit = d; }
+    for (let e = hit; e; e = e.parentNode || e.host) if (e === this) return '';
+    if (hit && hit.closest && hit.closest('label') && hit.closest('label').control === this) return '';
+    if (!hit) return 'element is outside the visible area';
+    const cls = typeof hit.className === 'string' && hit.className.trim() ? '.' + hit.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+    return 'covered by <' + hit.localName + (hit.id ? '#' + hit.id : '') + cls + '> "' + (hit.innerText || '').trim().slice(0, 50) + '"';
+  };
+  const why = test();
+  if (!why || why.startsWith('element has no size')) return why;
+  // Inside the window but clipped by its own scrolling list (dropdown options): scroll the list, then look again.
+  this.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+  return test();
 }`;
 async function point(h, force) {
   let why = '';
@@ -763,6 +804,14 @@ const TOOLS = {
       cur.set(a.agent, t.id);
       return `Target tab is now ${t.id}: ${t.title} | ${t.url}`;
     }
+    if (act === 'use') { // make a tab the target without focusing it, so the user's window is left alone
+      if (a.tab == null) throw new Error('use needs tab:<id> from tabs {action:"list"}.');
+      const t = await chrome.tabs.get(+a.tab).catch(() => null);
+      if (!t) throw new Error(`Tab ${a.tab} not found. Use tabs {action:"list"}.`);
+      if (owner(t.id, a.agent)) throw new Error(`Tab ${t.id} is in use by another agent. Pick a free tab, or open your own with navigate {url, newTab:true}.`);
+      cur.set(a.agent, t.id);
+      return `Target tab is now ${t.id}: ${t.title} | ${t.url} (left in the background)`;
+    }
     if (act === 'close') {
       const id = +(a.tab ?? cur.get(a.agent));
       await chrome.tabs.remove(id); // onRemoved clears every agent's claim on it
@@ -797,15 +846,20 @@ const TOOLS = {
   async click(a) {
     const s = await session(a);
     s.watching = true;
+    let h = null, tog = null;
     if (a.ref) {
-      const h = await handle(a);
-      const p = await point(h, a.force);
+      h = await handle(a);
+      tog = await call(h, TOGGLE);
+      let target = h;
+      // A styled checkbox or radio often hides its input under a decoration: click its label instead.
+      if (tog && !a.force && await call(h, ACTIONABLE)) target = (await related(h, 'function(){ return this.labels?.[0] || null; }')) || h;
+      const p = await point(target, a.force);
       await mouse(s, p.x, p.y, { button: a.button, clicks: a.double ? 2 : 1 });
     } else if (a.x != null && a.y != null) {
       await mouse(s, a.x / s.shotScale, a.y / s.shotScale, { button: a.button, clicks: a.double ? 2 : 1 });
     } else throw new Error('Give ref, or x and y from the last screenshot.');
     await settle(s);
-    return report(s, a);
+    return report(s, a, tog && !a.double ? await confirmToggle(h, tog) : '');
   },
 
   async hover(a) {
@@ -829,13 +883,20 @@ const TOOLS = {
       }`);
       if (!a.text) await press(s, 'Delete');
     }
+    let note = '';
     if (a.text) {
       if (a.slowly) for (const ch of a.text) await press(s, ch === '\n' ? 'Enter' : ch);
       else await cdp(s.tabId, 'Input.insertText', { text: a.text });
+      // A shrinking maxlength or a formatter can keep something other than what was typed. Say so, since the
+      // snapshot trims values and the difference is easy to miss. Read before Enter, which may clear the box.
+      const f = await call(h, "function(){ return /^(input|textarea)$/.test(this.localName) && this.type !== 'password' ? { v: this.value, ml: this.maxLength } : null; }");
+      if (f && (a.clear === false ? !f.v.endsWith(a.text) : f.v !== a.text))
+        note = `Note: the field holds "${f.v.length > 80 ? f.v.slice(0, 80) + '…' : f.v}", not the ${a.text.length} characters typed` +
+          `${f.ml >= 0 && f.v.length >= f.ml ? ` (it has maxlength=${f.ml})` : ''}.\n`;
     }
     if (a.submit) await press(s, 'Enter');
     await settle(s, 500); // longer quiet window: search boxes usually debounce 250-500ms before fetching
-    return report(s, a);
+    return report(s, a, note);
   },
 
   async press(a) {
@@ -861,6 +922,36 @@ const TOOLS = {
     if (err) throw new Error(err);
     await settle(h.s);
     return report(h.s, a);
+  },
+
+  // A custom dropdown in one call: open it, wait for the option to appear, then click it (scrolling it into view
+  // inside its list). Only items that appeared after opening count, so a matching label elsewhere is never clicked.
+  async choose(a) {
+    if (a.option == null || a.option === '') throw new Error('choose needs option: the text of the item to pick, e.g. option:"2026".');
+    const h = await handle(a), s = h.s, want = String(a.option);
+    if (await call(h, "function(){ return this.localName === 'select'; }")) return TOOLS.select({ ...a, value: want });
+    s.watching = true;
+    const opts = s.lastOpts || { mode: 'full' };
+    const before = new Set(refKeys((await collect(s, opts)).lines).keys());
+    const p = await point(h, a.force);
+    await mouse(s, p.x, p.y);
+    await settle(s);
+    let ref = null;
+    for (const end = Date.now() + 3000; ; await sleep(300)) {
+      const fresh = [...refKeys((await collect(s, opts)).lines)].filter(([r]) => !before.has(r)).map(([r, k]) => `[${r}] ${k}`);
+      ref = pickRef(fresh, { name: want });
+      if (ref) break;
+      if (Date.now() > end) throw new Error(fresh.length
+        ? `No option "${want}" appeared after opening it. It shows: ${fresh.slice(0, 20).map(l => l.replace(/^\[\S+\] /, '')).join(', ')}${fresh.length > 20 ? ', …' : ''}`
+        : 'Clicking it showed nothing new, so it is not a dropdown Reins can open. Click it and snapshot instead.');
+    }
+    const o = await resolve(s, ref);
+    if (!o) throw new Error(`The option "${want}" disappeared before it could be clicked.`);
+    const q = await point(o, a.force);
+    await mouse(s, q.x, q.y);
+    await settle(s);
+    const v = await call(h, "function(){ return /^(input|textarea)$/.test(this.localName) ? this.value : (this.innerText || '').trim(); }");
+    return report(s, a, `Chose "${want}"; the field now shows value="${String(v).slice(0, 80)}".\n`);
   },
 
   async scroll(a) {

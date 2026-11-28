@@ -376,15 +376,15 @@ const find = { type: 'object', description: 'Instead of ref: the role and name a
 const tool = (name, description, properties, required = []) =>
   ({ name, description, inputSchema: { type: 'object', properties: { ...properties, tab, browser }, required } });
 const TOOLS = [
-  tool('tabs', 'List, open, switch to (focus) or close tabs. The * tab is yours; tabs marked "other agent" belong to parallel agents, leave them alone.', {
-    action: { type: 'string', enum: ['list', 'new', 'switch', 'close'] }, url: { type: 'string' }, background: { type: 'boolean' } }),
+  tool('tabs', 'List, open, switch to (focus) or close tabs. use = make a tab your target without bringing it to the front. The * tab is yours; tabs marked "other agent" belong to parallel agents, leave them alone.', {
+    action: { type: 'string', enum: ['list', 'new', 'use', 'switch', 'close'] }, url: { type: 'string' }, background: { type: 'boolean' } }),
   tool('navigate', 'Load a URL (or back/forward/reload) in the target tab and return a snapshot.', {
     url: { type: 'string' }, newTab: { type: 'boolean' }, back: { type: 'boolean' }, forward: { type: 'boolean' }, reload: { type: 'boolean' },
     snapshot: { type: 'boolean', description: 'false to skip the snapshot' }, max: { type: 'number' } }),
   tool('snapshot', 'Compact page outline: text plus [ref] lines for interactive elements, across iframes and shadow DOM. Cheaper than a screenshot.', {
     mode: { type: 'string', enum: ['full', 'interactive', 'text'], description: 'interactive = refs only; text = readable page text' },
-    viewport: { type: 'boolean', description: 'Only what is on screen' }, query: { type: 'string', description: 'Only lines containing these words' },
-    max: { type: 'number', description: 'Char budget, default 8000' }, hrefs: { type: 'boolean', description: 'Show link URLs (off by default to save tokens)' } }),
+    viewport: { type: 'boolean', description: 'Only what is on screen' }, query: { type: 'string', description: 'Only lines containing all these words; "a|b" = either. Plain words, not a regex' },
+    max: { type: 'number', description: 'Char budget, default 8000' }, all: { type: 'boolean', description: 'While a modal dialog is open, also show the page behind it' }, hrefs: { type: 'boolean', description: 'Show link URLs (off by default to save tokens)' } }),
   tool('click', 'Real mouse click on a ref (scrolls into view, checks nothing covers it) or at x,y of the last screenshot.', {
     ref, find, x: { type: 'number' }, y: { type: 'number' }, double: { type: 'boolean' }, button: { type: 'string', enum: ['left', 'right', 'middle'] },
     force: { type: 'boolean', description: 'Click even if covered' }, snapshot: after }),
@@ -394,6 +394,8 @@ const TOOLS = [
   tool('press', 'Press keys: "Enter", "Escape", "Control+a", "Shift+Tab". Optional ref to focus first.', {
     key: { type: 'string' }, keys: { type: 'array', items: { type: 'string' } }, ref, find, snapshot: after }),
   tool('select', 'Choose an option in a native <select> by value or visible text.', { ref, find, value: { type: 'string' }, snapshot: after }, ['value']),
+  tool('choose', 'Pick from a custom dropdown in one call: clicks ref to open it, waits for the option with this text to appear, scrolls it into view and clicks it. Works for native <select> too.', {
+    ref, find, option: { type: 'string', description: 'Visible text of the item to pick' }, force: { type: 'boolean' }, snapshot: after }, ['option']),
   tool('hover', 'Move the mouse over a ref (menus, tooltips).', { ref, find, snapshot: after }),
   tool('scroll', 'Scroll the page, or the scrollable area under ref. With ref and no direction: scroll ref into view.', {
     ref, find, direction: { type: 'string', enum: ['down', 'up', 'left', 'right'] }, amount: { type: 'number', description: 'Screens, default 0.8' }, snapshot: after }),
@@ -403,7 +405,7 @@ const TOOLS = [
     maxWidth: { type: 'number', description: 'Default 1280' }, quality: { type: 'number', description: '1-100, default 60' } }),
   tool('eval', 'Run JavaScript in the page and return the JSON result. With ref, `el` is that element. Use `return` for multi-statement code.', {
     code: { type: 'string' }, ref, find, max: { type: 'number' } }, ['code']),
-  tool('batch', 'Run several actions in ONE call, e.g. fill a whole form and click Save. Each step is {tool, ...args} for click/type/press/select/hover/scroll/upload/wait/navigate/eval/snapshot. Stops at the first failure. Returns one diff for the whole sequence. Use it whenever you already know the next refs.', {
+  tool('batch', 'Run several actions in ONE call, e.g. fill a whole form and click Save. Each step is {tool, ...args} for click/type/press/select/choose/hover/scroll/upload/wait/navigate/eval/snapshot. Stops at the first failure. Returns one diff for the whole sequence. A step can target an element that only appears mid-batch with find:{role, name} instead of ref.', {
     steps: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' } }, required: ['tool'] } }, snapshot: after }, ['steps']),
   tool('wait','Wait until text appears (or is gone) or the URL contains a string; or sleep ms.', {
     text: { type: 'string' }, gone: { type: 'boolean' }, url: { type: 'string' }, ms: { type: 'number' }, timeout: { type: 'number' }, snapshot: after }),
