@@ -124,13 +124,14 @@ Reins is built for agents doing real work in your accounts. For headless test su
 
 | Tool | What it does |
 |---|---|
-| `tabs` | List, open, switch or close tabs. Marks your agent's own tab and tabs other agents are using. |
+| `tabs` | List, open, switch or close tabs, or `use` one as your target without focusing it. Marks your agent's own tab and tabs other agents are using. |
 | `navigate` | Open a URL, go back or forward, reload. |
-| `snapshot` | Compact page outline with stable refs (`e12`, `f1e5` in iframes). Covers shadow DOM and cross-site iframes. Filter with `query`; add `hrefs:true` for link URLs. |
-| `click` | Real mouse click on a ref, after checking nothing covers it. Or click at x,y on a screenshot. |
-| `type` | Type into a field. `submit:true` presses Enter; `slowly:true` for picky autocomplete widgets. |
+| `snapshot` | Compact page outline with stable refs (`e12`, `f1e5` in iframes). Covers shadow DOM and cross-site iframes. Filter with `query`; add `hrefs:true` for link URLs. While a modal is open it lists only the modal and its popups (`all:true` for everything). |
+| `click` | Real mouse click on a ref, after checking nothing covers it and scrolling it into view inside its list. Checkboxes and radios are confirmed to have changed. Or click at x,y on a screenshot. |
+| `type` | Type into a field. `submit:true` presses Enter; `slowly:true` for picky autocomplete widgets. Says so when the field kept something else (a maxlength cut, a formatter). |
 | `press` | Keys and shortcuts: `Enter`, `Escape`, `Control+a`. |
 | `select` | Pick an option in a native dropdown. |
+| `choose` | Pick from a custom dropdown in one call: open it, wait for the option, click it. |
 | `hover` | Open menus and tooltips. |
 | `scroll` | Scroll the page or one scrollable area. |
 | `upload` | Attach local files to a file input or upload button. |
@@ -223,7 +224,7 @@ Text on a web page can talk an agent into saving memory, and memory reaches ever
   reins review        # shows each pending note and every step of each recipe: approve, reject (deletes) or skip
   ```
   `reins review` only works in an interactive terminal, and MCP calls can never approve anything.
-- **Recipes can only act on the page.** Steps can click, type, press, select, hover, scroll, wait, snapshot and navigate, but not `eval` or `upload`, and `navigate` can only load pages on the recipe's own site. A recipe only runs while your tab is on its site. These rules are checked on save and again on every run, so a hand-edited file cannot get around them.
+- **Recipes can only act on the page.** Steps can click, type, press, select, choose, hover, scroll, wait, snapshot and navigate, but not `eval` or `upload`, and `navigate` can only load pages on the recipe's own site. A recipe only runs while your tab is on its site. These rules are checked on save and again on every run, so a hand-edited file cannot get around them.
 - **Only you write memory for every site** (`site:"*"`), from a terminal, or by adding lines to `~/.reins/memory/sites/_all.md`. A line you add as `- text` counts as approved.
 - **Secrets are refused, best effort.** Notes and steps are refused when they look like a labelled secret (`password: …`), a known key format (`sk_live_…`, `ghp_…`, `AKIA…`), a JWT, or a long random-looking string. Typing into a password-like field in a recipe must use a `{{param}}`. Review is the real safety net.
 
@@ -351,10 +352,11 @@ Yes, MIT licensed. Reins itself makes no network calls outside your machine.
 npm test                      # unit tests: memory store, locators, daemon (no browser needed)
 node test/fixture.js          # local test pages on :8701 and :8702
 node test/e2e.js              # end-to-end check against your connected browser
+node test/forms.js            # form-filling checks against your connected browser
 node test/bench.js            # hard-task benchmark: accuracy, turns, latency (BENCH_BROWSER=edge to pick a browser)
 ```
 
-`test/e2e.js` covers network recording, masking and replay (same-site and cross-origin), console capture, watches (text, query, run, per-agent isolation), tab ownership across an extension reload, field naming and link URL opt-in. Both scripts start their own fixture server, so stop any `test/fixture.js` you left running first, or it will serve stale pages on ports 8701 and 8702. After editing `extension/`, run `reins install extension=false`: it copies the extension to `~/.reins/extension` and reloads it in every connected browser.
+`test/e2e.js` covers network recording, masking and replay (same-site and cross-origin), console capture, watches (text, query, run, per-agent isolation), tab ownership across an extension reload, field naming and link URL opt-in. `node test/forms.js` covers form filling: typed values the page cut or reformatted, styled radios and checkboxes, dialogs closing, options in scrolling lists, `choose`, modal-scoped snapshots, script text in text mode and `tabs use`. Both scripts start their own fixture server, so stop any `test/fixture.js` you left running first, or it will serve stale pages on ports 8701 and 8702. After editing `extension/`, run `reins install extension=false`: it copies the extension to `~/.reins/extension` and reloads it in every connected browser.
 
 ## Author
 

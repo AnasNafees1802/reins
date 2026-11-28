@@ -14,7 +14,7 @@ const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 const PARAM = /\{\{\s*([a-z_]\w*)\s*\}\}/gi;
 // Page actions only: eval runs any script and upload reads any local file, so neither belongs in a stored workflow.
-const STEP_TOOLS = new Set(['click', 'type', 'press', 'select', 'hover', 'scroll', 'wait', 'navigate', 'snapshot']);
+const STEP_TOOLS = new Set(['click', 'type', 'press', 'select', 'choose', 'hover', 'scroll', 'wait', 'navigate', 'snapshot']);
 const MAX_NOTE = 500, MAX_NOTES = 50, MAX_STEPS = 50, MAX_RECIPE = 64 << 10, HINT_BUDGET = 1500;
 // Memories reach every future agent, so secrets must never land in them. Best effort: labelled secrets, well-known
 // key formats, JWTs, and long random-looking strings (see randomish).
